@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ calendar_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>{{ calendar_name }}
+      <span class="brand-sub">本机管理</span>
+    </div>
+    <nav class="mainnav">
+      <a href="/admin" class="{{ 'active' if active == 'calendar' else '' }}">日历</a>
+      <a href="/admin/settings" class="{{ 'active' if active == 'settings' else '' }}">设置</a>
+      <a href="/admin/sync" class="{{ 'active' if active == 'sync' else '' }}">同步状态</a>
+    </nav>
+    <form class="logout" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="ghost">退出</button>
+    </form>
+  </header>
+
+  <main class="page">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>本机管理地址 <code>http://localhost:443/admin</code></span>
+    <span>订阅地址 <code>{{ subscription_url }}</code></span>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

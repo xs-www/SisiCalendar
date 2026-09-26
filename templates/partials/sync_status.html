@@ -1,0 +1,97 @@
+<div id="sync-status" class="stack">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <section class="card">
+    <header class="card-head">
+      <h2>ICS 发布状态</h2>
+      <span class="chip {{ 'warn' if sync_state.dirty else 'ok' }}">
+        {{ '待修复' if sync_state.dirty else '正常' }}
+      </span>
+    </header>
+
+    {% if sync_state.last_error %}
+      <div class="alert error">最近错误:{{ sync_state.last_error }}</div>
+    {% endif %}
+
+    <dl class="kv">
+      <dt>当前导出版本</dt><dd>v{{ sync_state.version }}</dd>
+      <dt>生成时间(UTC)</dt><dd>{{ sync_state.generated_at or '尚未生成' }}</dd>
+      <dt>内容哈希</dt><dd class="mono">{{ (sync_state.content_hash or '—')[:16] }}…</dd>
+      <dt>文件大小</dt><dd>{{ sync_state.size_bytes }} 字节</dd>
+      <dt>发布文件</dt><dd>{{ '存在' if sync_state.file_exists else '缺失' }}</dd>
+      <dt>订阅地址</dt><dd class="mono">{{ sync_state.subscription_url }}</dd>
+      <dt>SMTP</dt><dd>{{ '已配置' if sync_state.mail_configured else '未配置' }}</dd>
+      <dt>同步人员</dt><dd>{{ sync_state.recipients_enabled }} 启用 / {{ sync_state.recipients_total }} 总计</dd>
+      <dt>上次成功发送</dt><dd>{{ sync_state.last_delivery_success_at or '—' }}</dd>
+    </dl>
+
+    <div class="form-actions">
+      <form hx-post="/admin/actions/regenerate" hx-target="#sync-status" hx-swap="outerHTML" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="button">重新生成 ICS</button>
+      </form>
+
+      <form hx-post="/admin/actions/send-latest" hx-target="#sync-status" hx-swap="outerHTML" class="inline"
+            hx-confirm="将向全部启用人员发送完整日历快照,确认继续?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="confirm" value="1">
+        <button type="submit" class="button primary" {{ 'disabled' if not sync_state.mail_configured else '' }}>
+          向当前人员发送最新版
+        </button>
+      </form>
+    </div>
+  </section>
+
+  <section class="card">
+    <header class="card-head">
+      <h2>邮件队列</h2>
+      <span class="chips">
+        <span class="chip">待发送 {{ sync_state.deliveries_pending }}</span>
+        <span class="chip">重试中 {{ sync_state.deliveries_retry_wait }}</span>
+        <span class="chip ok">已发送 {{ sync_state.deliveries_sent }}</span>
+        <span class="chip warn">失败 {{ sync_state.deliveries_failed }}</span>
+      </span>
+    </header>
+
+    {% if deliveries %}
+      <table class="table">
+        <thead>
+          <tr>
+            <th>版本</th><th>收件人</th><th>类型</th><th>状态</th>
+            <th>尝试</th><th>下次重试</th><th>错误</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for delivery in deliveries %}
+            <tr>
+              <td>v{{ delivery.export_version }}</td>
+              <td>{{ delivery.recipient_email }}</td>
+              <td>{{ change_labels.get(delivery.change_type, delivery.change_type) }}</td>
+              <td>
+                <span class="chip {{ 'ok' if delivery.status == 'sent' else ('warn' if delivery.status in ('failed','retry_wait') else '') }}">
+                  {{ status_labels.get(delivery.status, delivery.status) }}
+                </span>
+              </td>
+              <td>{{ delivery.attempt_count }}</td>
+              <td>{{ delivery.next_attempt_at.strftime('%Y-%m-%d %H:%M') if delivery.next_attempt_at else '—' }}</td>
+              <td class="ellipsis" title="{{ delivery.error_message or '' }}">{{ delivery.error_message or '—' }}</td>
+              <td>
+                {% if delivery.status != 'sent' %}
+                  <form hx-post="/admin/actions/retry/{{ delivery.id }}" hx-target="#sync-status" hx-swap="outerHTML" class="inline">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="button ghost small">重试</button>
+                  </form>
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">还没有发信记录。</p>
+    {% endif %}
+  </section>
+</div>

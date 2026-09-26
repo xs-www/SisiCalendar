@@ -1,0 +1,53 @@
+<form id="settings-form"
+      class="card"
+      hx-post="/admin/actions/settings"
+      hx-target="#settings-form"
+      hx-swap="outerHTML">
+  <header class="card-head">
+    <h2>日历设置</h2>
+  </header>
+
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+  <label class="field">
+    <span>日历名称 <em>显示在订阅文件与邮件中</em></span>
+    <input type="text" name="calendar_name" maxlength="100"
+           value="{{ overrides.get('calendar_name', settings.calendar_name) }}">
+  </label>
+
+  <label class="field">
+    <span>默认时区</span>
+    <input type="text" name="default_timezone" list="tz-list-settings"
+           value="{{ overrides.get('default_timezone', settings.default_timezone) }}">
+  </label>
+
+  <div class="field-row">
+    <label class="field">
+      <span>默认事件时长(分钟)</span>
+      <input type="number" name="default_event_duration_minutes" min="1" max="1440"
+             value="{{ overrides.get('default_event_duration_minutes', settings.default_event_duration_minutes) }}">
+    </label>
+    <label class="field">
+      <span>邮件最大重试次数</span>
+      <input type="number" name="mail_max_attempts" min="1" max="20"
+             value="{{ overrides.get('mail_max_attempts', settings.mail_max_attempts) }}">
+    </label>
+  </div>
+
+  <label class="field">
+    <span>重试退避间隔(分钟,逗号分隔)</span>
+    <input type="text" name="mail_backoff_minutes"
+           value="{{ overrides.get('mail_backoff_minutes', settings.mail_backoff_minutes) }}">
+  </label>
+
+  <div class="form-actions">
+    <button type="submit" class="button primary">保存设置</button>
+  </div>
+
+  <datalist id="tz-list-settings">
+    {% for zone in timezones %}<option value="{{ zone }}"></option>{% endfor %}
+  </datalist>
+</form>

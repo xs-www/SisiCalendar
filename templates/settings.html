@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}设置 · {{ calendar_name }}{% endblock %}
+
+{% block content %}
+<section class="grid-2">
+  {% include "partials/settings_form.html" %}
+
+  <div class="card">
+    <header class="card-head">
+      <h2>SMTP 发信配置</h2>
+      <span class="chip {{ 'ok' if mail_configured else 'warn' }}">
+        {{ '已配置' if mail_configured else '未配置' }}
+      </span>
+    </header>
+    <p class="hint">
+      口令只能通过环境变量 <code>SMTP_PASSWORD</code> 或 Docker Secret 注入,
+      不会写入数据库,界面也不会回显。
+    </p>
+    <dl class="kv">
+      <dt>服务器</dt><dd>{{ smtp.host or '—' }}</dd>
+      <dt>端口</dt><dd>{{ smtp.port }}</dd>
+      <dt>安全方式</dt><dd>{{ smtp.security }}</dd>
+      <dt>用户名</dt><dd>{{ smtp.username or '—' }}</dd>
+      <dt>发件地址</dt><dd>{{ smtp.from_address or '—' }}</dd>
+      <dt>发件人名称</dt><dd>{{ smtp.from_name or '—' }}</dd>
+      <dt>口令</dt><dd>{{ '已注入' if smtp.password_configured else '未注入' }}</dd>
+    </dl>
+
+    {% include "partials/mail_status.html" %}
+  </div>
+</section>
+
+<section class="card">
+  <header class="card-head">
+    <h2>同步人员</h2>
+    <span class="chip">会收到完整日历</span>
+  </header>
+  <p class="hint">
+    每位启用的同步人员都会在每次“保存并同步”后收到一封邮件,附件是**完整的最新版**日历,
+    其中可能包含你的全部私人日程。请逐位确认后再启用。
+  </p>
+  {% include "partials/recipients.html" %}
+</section>
+{% endblock %}

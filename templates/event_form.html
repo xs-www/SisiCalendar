@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% set editing = mode == 'edit' %}
+{% block title %}{{ '编辑日程' if editing else '新建日程' }} · {{ calendar_name }}{% endblock %}
+
+{% block content %}
+<section class="card form-card">
+  <header class="card-head">
+    <h1>{{ '编辑日程' if editing else '新建日程' }}</h1>
+    <a class="button ghost" href="/admin">返回日历</a>
+  </header>
+
+  <div id="form-errors" class="alert error" hidden></div>
+
+  <form id="event-form"
+        data-mode="{{ mode }}"
+        data-event-id="{{ event.id }}"
+        data-api="/api/v1"
+        data-csrf="{{ csrf_token }}"
+        data-redirect="/admin">
+
+    <label class="field">
+      <span>标题 <em>必填</em></span>
+      <input type="text" name="title" maxlength="200" required value="{{ event.title or '' }}">
+    </label>
+
+    <div class="field-row">
+      <label class="checkbox">
+        <input type="checkbox" name="all_day" id="all-day" {{ 'checked' if event.all_day else '' }}>
+        <span>全天事件</span>
+      </label>
+      <label class="field">
+        <span>状态</span>
+        <select name="status">
+          <option value="confirmed" {{ 'selected' if event.status == 'confirmed' else '' }}>已确认</option>
+          <option value="tentative" {{ 'selected' if event.status == 'tentative' else '' }}>待定</option>
+          <option value="cancelled" {{ 'selected' if event.status == 'cancelled' else '' }}>已取消</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>时区 <em>IANA</em></span>
+        <input type="text" name="timezone" list="tz-list" value="{{ event.timezone or default_timezone }}">
+      </label>
+    </div>
+
+    <div class="field-row" id="timed-fields">
+      <label class="field">
+        <span>开始时间</span>
+        <input type="datetime-local" name="start_at" value="{{ (event.start_local or '')[:16] }}">
+      </label>
+      <label class="field">
+        <span>结束时间</span>
+        <input type="datetime-local" name="end_at" value="{{ (event.end_local or '')[:16] }}">
+      </label>
+    </div>
+
+    <div class="field-row" id="allday-fields" hidden>
+      <label class="field">
+        <span>开始日期</span>
+        <input type="date" name="start_date" value="{{ event.start_date or '' }}">
+      </label>
+      <label class="field">
+        <span>结束日期 <em>不含当天</em></span>
+        <input type="date" name="end_date" value="{{ event.end_date_exclusive or '' }}">
+      </label>
+    </div>
+
+    <div class="field-row">
+      <label class="field">
+        <span>重复</span>
+        <select name="recurrence" id="recurrence">
+          {% for value, label in recurrence_labels.items() %}
+            <option value="{{ value }}" {{ 'selected' if recurrence_simple == value else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>重复截止日期 <em>可选</em></span>
+        <input type="date" name="recurrence_until" id="recurrence-until" value="{{ recurrence_until or '' }}">
+      </label>
+    </div>
+
+    <label class="field">
+      <span>地点</span>
+      <input type="text" name="location" maxlength="500" value="{{ event.location or '' }}">
+    </label>
+
+    <label class="field">
+      <span>说明</span>
+      <textarea name="description" rows="6" maxlength="10000">{{ event.description or '' }}</textarea>
+    </label>
+
+    <input type="hidden" name="expected_updated_at" value="{{ event.updated_at or '' }}">
+
+    <div class="form-actions">
+      <button type="submit" class="button primary">{{ '保存并同步' if editing else '创建并同步' }}</button>
+      <a class="button ghost" href="/admin">取消</a>
+      {% if editing %}
+        <button type="button" id="delete-event" class="button danger">删除日程</button>
+      {% endif %}
+    </div>
+    <p class="hint">
+      点击“{{ '保存并同步' if editing else '创建并同步' }}”后会立即重新生成 <code>calendar.ics</code>,
+      并向全部启用的同步人员发送完整日历附件。
+    </p>
+  </form>
+
+  <datalist id="tz-list">
+    {% for zone in timezones %}<option value="{{ zone }}"></option>{% endfor %}
+  </datalist>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/event_form.js"></script>
+{% endblock %}

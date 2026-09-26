@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}日历 · {{ calendar_name }}{% endblock %}
+
+{% block content %}
+<section class="toolbar">
+  <a class="button primary" href="/admin/events/new">新建日程</a>
+
+  <div class="filters">
+    <input id="filter-q" type="search" placeholder="关键词:标题 / 地点 / 说明">
+    <select id="filter-status">
+      <option value="">全部状态</option>
+      <option value="confirmed">已确认</option>
+      <option value="tentative">待定</option>
+      <option value="cancelled">已取消</option>
+    </select>
+    <select id="filter-kind">
+      <option value="">全部类型</option>
+      <option value="timed">定时事件</option>
+      <option value="all_day">全天事件</option>
+    </select>
+    <select id="filter-recurring">
+      <option value="">重复与否</option>
+      <option value="1">重复事件</option>
+      <option value="0">单次事件</option>
+    </select>
+    <button id="filter-apply" class="button ghost" type="button">筛选</button>
+    <button id="filter-reset" class="button ghost" type="button">重置</button>
+  </div>
+
+  <div class="chip {{ 'warn' if sync_state.dirty else 'ok' }}"
+       title="{{ sync_state.last_error or '' }}">
+    {% if sync_state.dirty %}
+      ICS 待修复
+    {% else %}
+      ICS 已生成 · v{{ sync_state.version }} · {{ sync_state.size_bytes }} 字节
+    {% endif %}
+  </div>
+</section>
+
+{% if sync_state.last_error %}
+  <div class="alert error">最近一次导出错误:{{ sync_state.last_error }}</div>
+{% endif %}
+
+<section id="calendar"
+         class="calendar-host"
+         data-api="/api/v1"
+         data-csrf="{{ csrf_token }}"
+         data-timezone="{{ default_timezone }}"
+         data-generated-at="{{ sync_state.generated_at or '' }}"></section>
+
+<div id="toast" class="toast" hidden></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/vendor/fullcalendar.global.min.js"></script>
+<script src="/static/vendor/fullcalendar.locales.min.js"></script>
+<script src="/static/js/calendar.js"></script>
+{% endblock %}

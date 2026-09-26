@@ -1,0 +1,8 @@
+# 统一处理行结束符,避免 Windows 检出后把 CRLF 带进容器
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff binary
+*.woff2 binary

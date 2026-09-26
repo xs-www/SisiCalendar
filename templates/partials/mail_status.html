@@ -1,0 +1,21 @@
+<div id="mail-status" class="mail-status">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <form hx-post="/admin/actions/mail-test"
+        hx-target="#mail-status"
+        hx-swap="outerHTML"
+        class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field grow">
+      <span>测试收件地址 <em>留空只验证连接</em></span>
+      <input type="email" name="to" placeholder="you@example.com" {{ 'disabled' if not mail_configured else '' }}>
+    </label>
+    <button type="submit" class="button" {{ 'disabled' if not mail_configured else '' }}>
+      测试连接 / 发送测试邮件
+    </button>
+  </form>
+  {% if not mail_configured %}
+    <p class="hint">缺少 <code>SMTP_HOST</code> 或 <code>SMTP_FROM_ADDRESS</code>,请先在 <code>.env</code> 中补全并重启容器。</p>
+  {% endif %}
+</div>

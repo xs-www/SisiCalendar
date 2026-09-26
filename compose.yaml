@@ -1,0 +1,49 @@
+services:
+  calendar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sisi-calendar:0.1.0
+    container_name: sisi-calendar
+
+    # 端口只绑定 IPv4 回环地址。省略 127.0.0.1 会让 Docker 绑定 0.0.0.0,
+    # 把管理界面暴露给局域网,切勿修改。
+    ports:
+      - "127.0.0.1:443:8000"
+
+    volumes:
+      # /data 是唯一需要持久化和备份的应用数据目录
+      - ./data:/data
+
+    env_file:
+      - .env
+
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: "8000"
+
+    restart: unless-stopped
+
+    # 容器停止时给正在进行的数据库事务与 ICS 原子替换留出时间
+    stop_grace_period: 30s
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

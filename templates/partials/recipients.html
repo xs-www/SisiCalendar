@@ -1,0 +1,70 @@
+<div id="recipients" class="recipients">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <form hx-post="/admin/partials/recipients"
+        hx-target="#recipients"
+        hx-swap="outerHTML"
+        class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="inline-form">
+      <label class="field grow">
+        <span>邮箱地址</span>
+        <input type="email" name="email" required placeholder="name@example.com">
+      </label>
+      <label class="field grow">
+        <span>显示名称 <em>可选</em></span>
+        <input type="text" name="display_name" maxlength="200">
+      </label>
+      <button type="submit" class="button primary">添加</button>
+    </div>
+    <label class="checkbox warn-check">
+      <input type="checkbox" name="acknowledge" value="1" required>
+      <span>我确认:该人员将收到包含全部日程的完整日历,可能包含我的私人日程。</span>
+    </label>
+  </form>
+
+  {% if recipients %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>邮箱</th><th>名称</th><th>状态</th><th>最后成功发送</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for recipient in recipients %}
+          <tr class="{{ '' if recipient.enabled else 'muted-row' }}">
+            <td>{{ recipient.email }}</td>
+            <td>{{ recipient.display_name or '—' }}</td>
+            <td>
+              <span class="chip {{ 'ok' if recipient.enabled else '' }}">
+                {{ '已启用' if recipient.enabled else '已停用' }}
+              </span>
+            </td>
+            <td>{{ recipient.last_sent_at.strftime('%Y-%m-%d %H:%M') if recipient.last_sent_at else '—' }}</td>
+            <td class="row-actions">
+              <form hx-post="/admin/partials/recipients/{{ recipient.id }}/toggle"
+                    hx-target="#recipients" hx-swap="outerHTML" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                {% if not recipient.enabled %}
+                  <input type="hidden" name="acknowledge" value="1">
+                {% endif %}
+                <button type="submit" class="button ghost small">
+                  {{ '停用' if recipient.enabled else '启用' }}
+                </button>
+              </form>
+              <form hx-post="/admin/partials/recipients/{{ recipient.id }}/delete"
+                    hx-target="#recipients" hx-swap="outerHTML" class="inline"
+                    hx-confirm="确定移除 {{ recipient.email }} 吗?之后的日程变更将不再发送给该邮箱。">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="button danger small">移除</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">还没有同步人员。添加后,每次“保存并同步”都会给对方发送完整日历附件。</p>
+  {% endif %}
+</div>
