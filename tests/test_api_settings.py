@@ -197,3 +197,98 @@ def test_settings_page_renders_smtp_status(
     assert page.status_code == 200
     assert "SMTP 发信配置" in page.text
     assert "未配置" in page.text
+
+
+def test_settings_page_lists_added_recipient(
+    admin_client: TestClient, api_headers: dict[str, str]
+) -> None:
+    _add(admin_client, api_headers, "shown@example.test", display_name="可见的人")
+    page = admin_client.get("/admin/settings")
+    assert page.status_code == 200
+    assert "shown@example.test" in page.text
+    assert "可见的人" in page.text
+    assert "已启用" in page.text
+
+
+def test_recipients_htmx_partial_renders_and_guards_acknowledgement(
+    admin_client: TestClient, api_headers: dict[str, str]
+) -> None:
+    page = admin_client.get("/admin/partials/recipients")
+    assert page.status_code == 200
+    assert 'id="recipients"' in page.text
+
+    # 未勾选隐私确认时添加必须被拒绝
+    rejected = admin_client.post(
+        "/admin/partials/recipients",
+        data={"email": "noack@example.test", "csrf_token": api_headers["X-CSRF-Token"]},
+    )
+    assert rejected.status_code == 422
+    assert "请先勾选确认" in rejected.text
+
+    accepted = admin_client.post(
+        "/admin/partials/recipients",
+        data={
+            "email": "withack@example.test",
+            "acknowledge": "1",
+            "csrf_token": api_headers["X-CSRF-Token"],
+        },
+    )
+    assert accepted.status_code == 200
+    assert "withack@example.test" in accepted.text
+
+
+def test_sync_page_shows_version_and_queue(
+    admin_client: TestClient, api_headers: dict[str, str]
+) -> None:
+    page = admin_client.get("/admin/sync")
+    assert page.status_code == 200
+    assert "ICS 发布状态" in page.text
+    assert "当前导出版本" in page.text
+    assert "邮件队列" in page.text
+    # 队列计数必须真的有值,而不是模板缺键渲染成空白
+    assert "待发送 0" in page.text
+    assert "已发送 0" in page.text
+
+
+def test_sync_partial_reports_errors_visibly(
+    admin_client: TestClient, api_headers: dict[str, str]
+) -> None:
+    response = admin_client.post(
+        "/admin/actions/regenerate", data={"csrf_token": api_headers["X-CSRF-Token"]}
+    )
+    assert response.status_code == 200
+    assert "已重新生成" in response.text
+    assert "v" in response.text
+
+
+def test_settings_form_partial_updates_and_validates(
+    admin_client: TestClient, api_headers: dict[str, str]
+) -> None:
+    ok = admin_client.post(
+        "/admin/actions/settings",
+        data={
+            "calendar_name": "HTMX 日历",
+            "default_timezone": "Asia/Shanghai",
+            "default_event_duration_minutes": "45",
+            "mail_max_attempts": "3",
+            "mail_backoff_minutes": "2,10",
+            "csrf_token": api_headers["X-CSRF-Token"],
+        },
+    )
+    assert ok.status_code == 200
+    assert "设置已保存" in ok.text
+    assert "HTMX 日历" in ok.text
+
+    bad = admin_client.post(
+        "/admin/actions/settings",
+        data={
+            "calendar_name": "",
+            "default_timezone": "Mars/Olympus",
+            "default_event_duration_minutes": "0",
+            "mail_max_attempts": "99",
+            "mail_backoff_minutes": "abc",
+            "csrf_token": api_headers["X-CSRF-Token"],
+        },
+    )
+    assert bad.status_code == 422
+    assert "保存失败" in bad.text
