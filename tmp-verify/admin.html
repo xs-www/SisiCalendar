@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>日历 · Sisi Calendar</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  <script src="/static/vendor/htmx.min.js" defer></script>
+  
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>Sisi Calendar
+      <span class="brand-sub">本机管理</span>
+    </div>
+    <nav class="mainnav">
+      <a href="/admin" class="active">日历</a>
+      <a href="/admin/settings" class="">设置</a>
+      <a href="/admin/sync" class="">同步状态</a>
+    </nav>
+    <form class="logout" method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="Ik1ckDe0SEFqo2BzHUyayPIkuwVSF1ArqcmzG9DlJRY">
+      <button type="submit" class="ghost">退出</button>
+    </form>
+  </header>
+
+  <main class="page">
+    
+<section class="toolbar">
+  <a class="button primary" href="/admin/events/new">新建日程</a>
+
+  <div class="filters">
+    <input id="filter-q" type="search" placeholder="关键词:标题 / 地点 / 说明">
+    <select id="filter-status">
+      <option value="">全部状态</option>
+      <option value="confirmed">已确认</option>
+      <option value="tentative">待定</option>
+      <option value="cancelled">已取消</option>
+    </select>
+    <select id="filter-kind">
+      <option value="">全部类型</option>
+      <option value="timed">定时事件</option>
+      <option value="all_day">全天事件</option>
+    </select>
+    <select id="filter-recurring">
+      <option value="">重复与否</option>
+      <option value="1">重复事件</option>
+      <option value="0">单次事件</option>
+    </select>
+    <button id="filter-apply" class="button ghost" type="button">筛选</button>
+    <button id="filter-reset" class="button ghost" type="button">重置</button>
+  </div>
+
+  <div class="chip ok"
+       title="">
+    
+      ICS 已生成 · v2 · 885 字节
+    
+  </div>
+</section>
+
+
+
+<section id="calendar"
+         class="calendar-host"
+         data-api="/api/v1"
+         data-csrf="Ik1ckDe0SEFqo2BzHUyayPIkuwVSF1ArqcmzG9DlJRY"
+         data-timezone="Australia/Brisbane"
+         data-generated-at="2026-09-26T23:37:32.116562Z"></section>
+
+<div id="toast" class="toast" hidden></div>
+
+  </main>
+
+  <footer class="footer">
+    <span>本机管理地址 <code>http://localhost:443/admin</code></span>
+    <span>订阅地址 <code>https://sisi-laptop.tail921448.ts.net/calendar</code></span>
+  </footer>
+
+  <div id="toast" class="toast" hidden></div>
+  
+<script src="/static/vendor/fullcalendar.global.min.js"></script>
+<script src="/static/vendor/fullcalendar.locales.min.js"></script>
+<script src="/static/js/calendar.js"></script>
+
+</body>
+</html>
