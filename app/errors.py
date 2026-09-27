@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,18 @@ def error_payload(code: str, message: str, fields: dict[str, str] | None = None)
     return {"error": {"code": code, "message": message, "fields": fields}}
 
 
+def field_errors_from(exc: ValidationError) -> dict[str, str]:
+    """把 pydantic 校验错误压成 {字段: 原因},便于人工与 Agent 定位。"""
+    fields: dict[str, str] = {}
+    for item in exc.errors():
+        location = [
+            str(part) for part in item.get("loc", ()) if part not in ("body", "query", "path")
+        ]
+        key = ".".join(location) or "request"
+        fields.setdefault(key, item.get("msg", "输入不合法"))
+    return fields
+
+
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(StarletteHTTPException)
     async def _http_exception_handler(
@@ -46,12 +59,9 @@ def install_error_handlers(app: FastAPI) -> None:
     async def _validation_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        fields: dict[str, str] = {}
-        for item in exc.errors():
-            location = [str(part) for part in item.get("loc", ()) if part not in ("body", "query")]
-            key = ".".join(location) or "request"
-            fields.setdefault(key, item.get("msg", "输入不合法"))
         return JSONResponse(
-            error_payload("validation_error", "请求参数校验失败", fields),
+            error_payload(
+                "validation_error", "请求参数校验失败", field_errors_from(exc)
+            ),
             status_code=422,
         )

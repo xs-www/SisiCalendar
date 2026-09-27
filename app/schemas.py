@@ -38,6 +38,9 @@ class EventWrite(BaseModel):
     # 非全天事件
     start_at: str | None = None
     end_at: str | None = None
+    # 便捷写法:只给开始时间 + 时长,或干脆省略(用默认时长)。
+    # 主要给 iOS 快捷指令这类不方便算结束时间的调用方使用。
+    duration_minutes: int | None = Field(default=None, ge=1, le=10080)
 
     # 全天事件,end_date 不含在事件内
     start_date: str | None = None

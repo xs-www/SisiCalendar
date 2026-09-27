@@ -1,5 +1,8 @@
 # 运行时数据:数据库、导出文件、快照与备份,均不入库
+# 用 /data* 覆盖 data/ 以及 data.dev-20260927 这类归档目录
 /data/
+/data*/
+!/data*.md
 *.db
 *.db-wal
 *.db-shm

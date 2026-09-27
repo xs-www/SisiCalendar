@@ -244,6 +244,111 @@ def test_agent_token_never_appears_in_response(
     assert AGENT_TOKEN not in status.text
 
 
+def test_accepts_form_encoded_body_for_shortcuts(
+    agent_client: TestClient, agent_headers: dict[str, str]
+) -> None:
+    """iOS 快捷指令的「获取 URL 内容 → Form」直接发 form-urlencoded,必须支持。"""
+    response = agent_client.post(
+        "/api/agent/events",
+        data={
+            "title": "快捷指令添加的日程",
+            "start_at": "2026-11-06 14:00",  # 空格分隔、缺秒
+            "duration_minutes": "90",
+            "timezone": "Australia/Brisbane",
+            "location": "和客户喝咖啡",
+            "client_ref": "shortcut-001",
+            "description": "",  # 留空字段应视为未提供
+        },
+        headers=agent_headers,
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["title"] == "快捷指令添加的日程"
+    assert body["source"] == EVENT_SOURCE_AGENT
+    assert body["start_at_utc"] == "2026-11-06T04:00:00Z"
+    assert body["end_at_utc"] == "2026-11-06T05:30:00Z", "14:00 起 + 90 分钟应为 15:30"
+    assert body["description"] is None
+
+    replay = agent_client.post(
+        "/api/agent/events",
+        data={"title": "重复提交", "start_at": "2026-11-06 14:00", "client_ref": "shortcut-001"},
+        headers=agent_headers,
+    )
+    assert replay.status_code == 200
+    assert replay.json()["duplicate"] is True
+    assert replay.json()["id"] == body["id"]
+
+
+def test_duration_defaults_to_setting_when_end_missing(
+    agent_client: TestClient, agent_headers: dict[str, str]
+) -> None:
+    response = agent_client.post(
+        "/api/agent/events",
+        data={"title": "只给开始时间", "start_at": "2026-11-07 09:00"},
+        headers=agent_headers,
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["start_at_utc"] == "2026-11-06T23:00:00Z"
+    assert body["end_at_utc"] == "2026-11-07T00:00:00Z", "默认时长 60 分钟"
+
+
+def test_lenient_datetime_formats(
+    agent_client: TestClient, agent_headers: dict[str, str]
+) -> None:
+    for index, start in enumerate(["2026/11/08 14:00", "2026年11月8日 14:00", "2026-11-08"]):
+        response = agent_client.post(
+            "/api/agent/events",
+            data={
+                "title": f"宽松格式 {index}",
+                "start_at": start,
+                "client_ref": f"lenient-{index}",
+            },
+            headers=agent_headers,
+        )
+        assert response.status_code == 201, f"{start} 解析失败:{response.text}"
+
+    calendar = Calendar.from_ical(agent_client.get("/calendar").content)
+    summaries = sorted(str(c["SUMMARY"]) for c in calendar.walk("VEVENT"))
+    assert summaries == ["宽松格式 0", "宽松格式 1", "宽松格式 2"]
+
+
+def test_unsupported_content_type_rejected(
+    agent_client: TestClient, agent_headers: dict[str, str]
+) -> None:
+    response = agent_client.post(
+        "/api/agent/events",
+        content="title=x",
+        headers={**agent_headers, "Content-Type": "text/plain"},
+    )
+    assert response.status_code == 415
+    assert response.json()["error"]["code"] == "unsupported_media_type"
+
+
+def test_malformed_json_is_reported(
+    agent_client: TestClient, agent_headers: dict[str, str]
+) -> None:
+    response = agent_client.post(
+        "/api/agent/events",
+        content="{not json",
+        headers={**agent_headers, "Content-Type": "application/json"},
+    )
+    assert response.status_code == 422
+    assert "JSON" in response.json()["error"]["message"]
+
+
+def test_unknown_form_field_is_rejected(
+    agent_client: TestClient, agent_headers: dict[str, str]
+) -> None:
+    response = agent_client.post(
+        "/api/agent/events",
+        data={"title": "打错字段名", "start_at": "2026-11-09 09:00", "wrong_field": "x"},
+        headers=agent_headers,
+    )
+    assert response.status_code == 422
+    assert "wrong_field" in response.json()["error"]["fields"]
+
+
 def test_agent_event_editable_from_admin_ui(
     admin_client: TestClient, api_headers: dict[str, str], agent_client: TestClient,
     agent_headers: dict[str, str],

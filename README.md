@@ -45,7 +45,17 @@ curl.exe -X POST https://sisi-laptop.tail921448.ts.net/agent/events `
 ```
 
 带同一个 `client_ref` 重试是安全的:服务端返回已存在的事件(`"duplicate": true`),
-不会重复建事件,也不会重复发信。字段清单、状态码与开启步骤见
+不会重复建事件,也不会重复发信。请求体也能用表单形式,方便 iOS 快捷指令直接调用:
+
+```text
+POST https://sisi-laptop.tail921448.ts.net/agent/events
+Authorization: Bearer <AGENT_API_TOKEN>
+Content-Type: application/x-www-form-urlencoded
+
+title=和客户喝咖啡&start_at=2026-11-06 14:00&duration_minutes=90
+```
+
+字段清单、状态码、开启步骤与 iOS 快捷指令配置见
 [`docs/部署与运维.md`](docs/部署与运维.md) 第 3.4 节。
 
 ## 本机开发

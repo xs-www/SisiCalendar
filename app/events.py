@@ -34,6 +34,7 @@ from app.timeutil import (
     is_valid_timezone,
     iso_utc,
     local_to_utc,
+    normalize_datetime_text,
     parse_date,
     utc_to_local,
     utcnow,
@@ -65,12 +66,13 @@ class EventConflictError(RuntimeError):
 # 输入校验
 # --------------------------------------------------------------------------
 def _parse_input_datetime(text: str, tz_name: str) -> datetime | None:
-    """把输入时间解析为 naive UTC。无偏移量时按事件时区解释。"""
-    value = text.strip()
+    """把输入时间解析为 naive UTC。无偏移量时按事件时区解释。
+
+    接受 ISO 8601 及其常见变体:空格分隔、缺秒、纯日期、斜杠或中文日期分隔符。
+    """
+    value = normalize_datetime_text(text)
     if not value:
         return None
-    if value.endswith(("Z", "z")):
-        value = value[:-1] + "+00:00"
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
@@ -212,9 +214,9 @@ def normalize_event_input(
         elif existing is not None and not existing.all_day:
             end_at_utc = existing.end_at_utc
         if end_at_utc is None and start_at_utc is not None:
-            end_at_utc = start_at_utc + timedelta(
-                minutes=max(1, resolved.default_event_duration_minutes)
-            )
+            requested = payload.duration_minutes if "duration_minutes" in provided else None
+            minutes = max(1, requested or resolved.default_event_duration_minutes)
+            end_at_utc = start_at_utc + timedelta(minutes=minutes)
 
         if start_at_utc is None:
             errors.setdefault("start_at", "非全天事件必须提供开始时间")
