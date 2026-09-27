@@ -76,6 +76,10 @@ app/
 9. **全天事件的 `end_date_exclusive` 不含在事件内**;ICS 里 `DTEND` 是同义的不含边界日期。
 10. **默认时区相关查询**:`GET /api/v1/events` 只有显式给了 `start`/`end` 才做日期过滤,
     否则关键词检索应覆盖全部事件。
+11. **远程 Agent 接口(`/api/agent`)**只认 `Authorization: Bearer`,不接受 Cookie 会话
+    (因此没有 CSRF 面,也意味着已登录会话不能调用它);`AGENT_API_TOKEN` 为空时整段返回 404
+    而不是 401,避免暴露接口存在;`client_ref` 命中时必须原样返回既有事件,不得新建、
+    不得重新导出、不得发信。见 `tests/test_api_agent.py`。
 
 ## 部署时的两个陷阱
 

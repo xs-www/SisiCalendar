@@ -1,7 +1,9 @@
-"""FastAPI 依赖:模板环境、登录校验与 CSRF 防护。"""
+﻿"""FastAPI 依赖:模板环境、登录校验与 CSRF 防护。"""
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
@@ -117,6 +119,66 @@ def raise_api_error(
         status_code=status_code,
         detail={"error": {"code": code, "message": message, "fields": fields}},
     )
+
+
+# --------------------------------------------------------------------------
+# 远程 Agent 鉴权
+# --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class AgentPrincipal:
+    """已通过 Bearer Token 认证的调用方。
+
+    只保留令牌指纹,方便限流分桶与审计;令牌明文不进入日志或响应。
+    """
+
+    fingerprint: str
+
+    @property
+    def label(self) -> str:
+        return f"agent:{self.fingerprint}"
+
+
+def _bearer_from(request: Request) -> str:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[len("bearer ") :].strip()
+    return ""
+
+
+def require_agent_token(request: Request) -> AgentPrincipal:
+    """校验 `Authorization: Bearer <token>`。
+
+    未配置任何令牌时,整个 `/api/agent` 视为不存在,返回 404 而不是 401,
+    避免向未授权方暴露「这里有一个需要凭据的接口」。
+    """
+    tokens = get_settings().agent_tokens
+    if not tokens:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error": {"code": "not_found", "message": "Not Found", "fields": None}},
+        )
+
+    provided = _bearer_from(request)
+    if provided:
+        for token in tokens:
+            if hmac.compare_digest(provided, token):
+                digest = hashlib.sha256(provided.encode()).hexdigest()[:16]
+                return AgentPrincipal(fingerprint=digest)
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={
+            "error": {
+                "code": "unauthorized",
+                "message": "缺少或无效的 Agent 令牌",
+                "fields": None,
+            }
+        },
+        headers={"WWW-Authenticate": 'Bearer realm="sisi-calendar-agent"'},
+    )
+
+
+AgentDep = Annotated[AgentPrincipal, Depends(require_agent_token)]
 
 
 UNAUTHORIZED = status.HTTP_401_UNAUTHORIZED

@@ -9,7 +9,7 @@
 
   const api = host.dataset.api || "/api/v1";
   const csrf = host.dataset.csrf || "";
-  const filters = { q: "", status: "", kind: "", recurring: "" };
+  const filters = { q: "", status: "", kind: "", recurring: "", source: "" };
 
   // ---------- 提示 ----------
   function toast(message, kind) {
@@ -51,6 +51,7 @@
     if (filters.kind === "timed") params.set("all_day", "false");
     if (filters.recurring === "1") params.set("recurring", "true");
     if (filters.recurring === "0") params.set("recurring", "false");
+    if (filters.source) params.set("source", filters.source);
     return api + "/events?" + params.toString();
   }
 
@@ -72,6 +73,7 @@
         description: item.description || "",
         rrule_label: item.rrule_label || "",
         status: item.status || "confirmed",
+        source: item.source || "web",
         updated_at: item.updated_at || ""
       }
     };
@@ -215,6 +217,7 @@
     filters.status = document.getElementById("filter-status").value || "";
     filters.kind = document.getElementById("filter-kind").value || "";
     filters.recurring = document.getElementById("filter-recurring").value || "";
+    filters.source = document.getElementById("filter-source").value || "";
   }
 
   document.getElementById("filter-apply").addEventListener("click", function () {
@@ -227,6 +230,7 @@
     document.getElementById("filter-status").value = "";
     document.getElementById("filter-kind").value = "";
     document.getElementById("filter-recurring").value = "";
+    document.getElementById("filter-source").value = "";
     readFilters();
     calendar.refetchEvents();
   });

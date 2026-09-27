@@ -11,11 +11,13 @@ import pytest
 from app import db as db_module
 from app.config import Settings, reset_settings_cache
 from app.models import Base
+from app.security import rate_limiter
 from fastapi.testclient import TestClient
 
 TEST_TIMEZONE = "Australia/Brisbane"
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "test-password"
+AGENT_TOKEN = "test-agent-token-abcdefghijklmnop"
 
 
 @pytest.fixture()
@@ -35,6 +37,8 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Settin
                 "SCHEDULER_",
                 "FEED_",
                 "BACKUP_",
+                "AGENT_",
+                "SISI_ENV_FILE",
             )
         ):
             monkeypatch.delenv(key, raising=False)
@@ -47,11 +51,17 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Settin
     monkeypatch.setenv("CALENDAR_NAME", "Sisi 测试日历")
     monkeypatch.setenv("SUBSCRIPTION_URL", "https://example.test/calendar")
     monkeypatch.setenv("SCHEDULER_ENABLED", "false")
+    # 关键:把配置文件指向不存在的路径,否则测试会读到开发机上的 .env
+    # (例如 AGENT_API_TOKEN、SMTP_* 会意外生效,让用例结果依赖本机环境)
+    monkeypatch.setenv("SISI_ENV_FILE", str(tmp_path / "no-such.env"))
     reset_settings_cache()
+    # 限流器是模块级单例,必须逐测试重置,否则前一个用例会消耗掉后一个的配额
+    rate_limiter.reset()
 
     resolved = Settings()
     resolved.ensure_directories()
     yield resolved
+    rate_limiter.reset()
     reset_settings_cache()
 
 
@@ -122,3 +132,27 @@ def session_csrf(admin_client: TestClient) -> str:
 @pytest.fixture()
 def api_headers(session_csrf: str) -> dict[str, str]:
     return {"X-CSRF-Token": session_csrf}
+
+
+# --------------------------------------------------------------------------
+# 远程 Agent 接入夹具
+# --------------------------------------------------------------------------
+@pytest.fixture()
+def agent_client(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[TestClient]:
+    """配置了 AGENT_API_TOKEN 的应用实例。"""
+    from app.main import create_app
+
+    monkeypatch.setenv("AGENT_API_TOKEN", AGENT_TOKEN)
+    reset_settings_cache()
+    application = create_app(Settings())
+    with TestClient(application, follow_redirects=False) as test_client:
+        yield test_client
+    db_module.dispose_engine()
+    reset_settings_cache()
+
+
+@pytest.fixture()
+def agent_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {AGENT_TOKEN}"}

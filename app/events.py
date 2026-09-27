@@ -19,7 +19,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
-from app.models import EVENT_STATUSES, Event, new_event_uid
+from app.models import EVENT_SOURCE_WEB, EVENT_STATUSES, Event, new_event_uid
 from app.recurrence import (
     RRuleError,
     build_rrule_from_form,
@@ -276,10 +276,20 @@ def create_event(
     payload: EventWrite,
     *,
     settings: Settings | None = None,
+    source: str = EVENT_SOURCE_WEB,
+    client_ref: str | None = None,
 ) -> Event:
     values = normalize_event_input(payload, existing=None, settings=settings)
     now = utcnow()
-    event = Event(uid=new_event_uid(), sequence=0, created_at=now, updated_at=now, **values)  # type: ignore[arg-type]
+    event = Event(
+        uid=new_event_uid(),
+        sequence=0,
+        created_at=now,
+        updated_at=now,
+        source=source,
+        client_ref=(client_ref or None),
+        **values,  # type: ignore[arg-type]
+    )
     session.add(event)
     session.flush()
     return event
@@ -418,6 +428,7 @@ def query_events(
     date_range: DateRange | None = None,
     keyword: str | None = None,
     status: str | None = None,
+    source: str | None = None,
     all_day: bool | None = None,
     recurring: bool | None = None,
     include_deleted: bool = False,
@@ -472,6 +483,8 @@ def query_events(
 
     if status:
         conditions.append(Event.status == status)
+    if source:
+        conditions.append(Event.source == source)
     if all_day is not None:
         conditions.append(Event.all_day.is_(all_day))
     if recurring is not None:
@@ -664,6 +677,8 @@ def serialize_event(event: Event) -> dict[str, object]:
         "all_day": bool(event.all_day),
         "timezone": tz_name,
         "status": event.status,
+        "source": event.source or EVENT_SOURCE_WEB,
+        "client_ref": event.client_ref,
         "rrule": event.rrule,
         "rrule_label": describe_rrule(event.rrule),
         "start_at_utc": iso_utc(event.start_at_utc),

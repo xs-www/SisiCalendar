@@ -21,6 +21,32 @@
 | 邮件同步 | 持久化队列、`(版本, 收件人)` 幂等、逐人独立发送、退避重试、旧版附件隔离 |
 | 安全 | Argon2id 口令、签名会话、CSRF 双提交、限流、严格 CSP、口令只从环境注入 |
 | 运维 | 健康/就绪检查、一致性自检、在线备份与恢复、Alembic 迁移、Docker Compose |
+| 远程 Agent | 可选的 Bearer 令牌接口,供外部 Agent 经 HTTP 新建日程;默认关闭,幂等键防重试重复 |
+
+## 远程 Agent 接入(默认关闭)
+
+给本机之外的脚本或 Agent 一个写入入口。未配置 `AGENT_API_TOKEN` 时接口返回 404,等同不存在。
+
+```powershell
+curl.exe -X POST https://sisi-laptop.tail921448.ts.net/agent/events `
+  -H "Authorization: Bearer <AGENT_API_TOKEN>" `
+  -H "Content-Type: application/json; charset=utf-8" `
+  --data-binary "@event.json"
+```
+
+```json
+{
+  "title": "和牙医的预约",
+  "start_at": "2026-11-03T14:00:00",
+  "end_at": "2026-11-03T15:00:00",
+  "timezone": "Australia/Brisbane",
+  "client_ref": "dentist-2026-11-03"
+}
+```
+
+带同一个 `client_ref` 重试是安全的:服务端返回已存在的事件(`"duplicate": true`),
+不会重复建事件,也不会重复发信。字段清单、状态码与开启步骤见
+[`docs/部署与运维.md`](docs/部署与运维.md) 第 3.4 节。
 
 ## 本机开发
 

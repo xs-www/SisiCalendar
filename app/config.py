@@ -1,13 +1,15 @@
 """应用配置。
 
-所有可配置项都来自环境变量或 `.env`,SMTP 密码等敏感信息只允许通过环境注入,
-绝不写入 SQLite、日志或镜像。
+所有可配置项都来自环境变量或 `.env`(路径可用环境变量 `SISI_ENV_FILE` 覆盖,
+设为不存在的路径即可完全忽略 `.env`,测试就是这么隔离的)。SMTP 密码等敏感信息
+只允许通过环境注入,绝不写入 SQLite、日志或镜像。
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -19,12 +21,18 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# 默认配置文件;测试会把它指向一个不存在的路径,避免读到你本机的 .env
+DEFAULT_ENV_FILE = ".env"
+
 
 class Settings(BaseSettings):
-    """从环境变量加载的运行时配置。"""
+    """从环境变量加载的运行时配置。
+
+    注意:`env_file` 刻意不写进 model_config,而是在 `get_settings()` 里显式传入,
+    这样直接 `Settings()` 构造出来的实例只依赖进程环境变量,行为可预测。
+    """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -66,6 +74,11 @@ class Settings(BaseSettings):
     export_snapshot_retention_days: int = 30
     scheduler_interval_seconds: int = 60
     scheduler_enabled: bool = True
+
+    # ---------- 远程 Agent 接入 ----------
+    # 逗号分隔可配置多个 token,便于分批轮换。留空则 /api/agent 视为不存在(返回 404)。
+    agent_api_token: str | None = None
+    agent_rate_limit_per_minute: int = 60
 
     # ---------- 备份 ----------
     backup_retention_days: int = 14
@@ -114,6 +127,16 @@ class Settings(BaseSettings):
     @property
     def mail_configured(self) -> bool:
         return bool(self.smtp_host and self.smtp_from_address)
+
+    @property
+    def agent_tokens(self) -> tuple[str, ...]:
+        """可用的 Agent 访问令牌。支持逗号分隔多个,便于轮换。"""
+        raw = self.agent_api_token or ""
+        return tuple(chunk.strip() for chunk in raw.split(",") if chunk.strip())
+
+    @property
+    def agent_enabled(self) -> bool:
+        return bool(self.agent_tokens)
 
     @field_validator("data_dir", mode="before")
     @classmethod
@@ -167,9 +190,14 @@ def _harden(path: Path) -> None:
         path.chmod(0o600)
 
 
+def env_file_path() -> str:
+    """配置文件路径。指向不存在的文件时等价于「忽略 .env」。"""
+    return os.environ.get("SISI_ENV_FILE", DEFAULT_ENV_FILE) or ""
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    return Settings(_env_file=env_file_path())
 
 
 def reset_settings_cache() -> None:

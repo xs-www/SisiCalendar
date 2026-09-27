@@ -17,6 +17,7 @@ from app.db import session_scope
 from app.deps import STATIC_DIR, CsrfFailure, NotAuthenticated
 from app.errors import error_payload, install_error_handlers
 from app.routers import (
+    api_agent,
     api_events,
     api_recipients,
     api_settings,
@@ -123,6 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(auth.router)
     app.include_router(pages.router)
     app.include_router(api_events.router)
+    app.include_router(api_agent.router)
     app.include_router(api_recipients.router)
     app.include_router(api_settings.router)
     app.include_router(api_sync.router)

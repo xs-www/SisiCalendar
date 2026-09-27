@@ -52,6 +52,9 @@ class EventWrite(BaseModel):
     # 乐观锁:提交上一次读取到的 updated_at,不匹配则返回 409
     expected_updated_at: str | None = None
 
+    # 幂等键:远程 Agent 重试时带上同一个值,服务端返回已存在的事件而不是重复创建
+    client_ref: str | None = Field(default=None, max_length=200)
+
 
 class EventRead(BaseModel):
     id: str
@@ -62,6 +65,8 @@ class EventRead(BaseModel):
     all_day: bool
     timezone: str
     status: str
+    source: str = "web"
+    client_ref: str | None = None
     rrule: str | None = None
     rrule_label: str = "不重复"
 

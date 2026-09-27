@@ -11,6 +11,13 @@
 
   <div id="form-errors" class="alert error" hidden></div>
 
+  {% if editing and event.source == 'agent' %}
+    <div class="alert ok">
+      这条日程由远程 Agent 创建{% if event.client_ref %}(幂等键 <code>{{ event.client_ref }}</code>){% endif %}。
+      手动修改后会按正常流程重新生成 ICS 并通知同步人员。
+    </div>
+  {% endif %}
+
   <form id="event-form"
         data-mode="{{ mode }}"
         data-event-id="{{ event.id }}"

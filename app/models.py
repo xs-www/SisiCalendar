@@ -29,6 +29,11 @@ UID_DOMAIN = "sisi-calendar"
 
 EVENT_STATUSES = ("confirmed", "tentative", "cancelled")
 
+# 事件来源:本机管理界面 / 远程 Agent
+EVENT_SOURCE_WEB = "web"
+EVENT_SOURCE_AGENT = "agent"
+EVENT_SOURCES = (EVENT_SOURCE_WEB, EVENT_SOURCE_AGENT)
+
 CHANGE_CREATED = "created"
 CHANGE_UPDATED = "updated"
 CHANGE_DELETED = "deleted"
@@ -89,6 +94,14 @@ class Event(Base):
     all_day: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     rrule: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="confirmed")
+
+    # 来源与 Agent 幂等键:client_ref 由调用方提供,重复提交返回同一事件而不是新建
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=EVENT_SOURCE_WEB, index=True
+    )
+    client_ref: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, unique=True, index=True
+    )
 
     sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
