@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from app.config import Settings
@@ -210,6 +210,34 @@ def test_content_is_deterministic(session, settings: Settings) -> None:
     first = export_calendar(session, settings=settings).path.read_bytes()
     second = export_calendar(session, settings=settings, force_new_version=True).path.read_bytes()
     assert first == second
+
+
+def test_content_is_deterministic_across_wall_clock(
+    session, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """导出内容不得依赖“导出时刻”。
+
+    导出器用内容哈希判断是否需要新版本。若 DTSTAMP 之类字段取自挂钟时间,跨秒重新导出
+    就会得到不同哈希,于是没有改动的保存也会递增版本,并向所有同步人员重发一次完整日历。
+    这里把时钟拨到第二天,内容必须仍逐字节一致。
+    """
+    _write(
+        session,
+        settings,
+        title="跨秒稳定性",
+        start_at="2025-11-10T08:00:00",
+        end_at="2025-11-10T09:00:00",
+    )
+    session.commit()
+
+    import app.ics as ics_module
+
+    first = export_calendar(session, settings=settings).path.read_bytes()
+    later = utcnow() + timedelta(days=1, seconds=5)
+    monkeypatch.setattr(ics_module, "utcnow", lambda: later)
+    second = export_calendar(session, settings=settings, force_new_version=True).path.read_bytes()
+
+    assert first == second, "导出内容必须只取决于数据库状态,不能取决于导出时刻"
 
 
 def test_utc_event_has_no_timezone_component(session, settings: Settings) -> None:

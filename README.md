@@ -55,8 +55,12 @@ docker compose up -d --build
 订阅入口通过 Tailscale Serve 单独暴露:
 
 ```powershell
-tailscale serve --bg --yes --https=443 --set-path=/calendar http://127.0.0.1:443
+tailscale serve status          # 先留存现状
+tailscale serve --bg --yes --https=443 --set-path=/calendar http://127.0.0.1:443/calendar
 ```
+
+> 目标地址里必须带上 `/calendar`。Tailscale Serve 会剥掉挂载前缀,若写成
+> `http://127.0.0.1:443`,则 `/calendar/admin` 会落到后端的管理首页,把管理界面暴露给整个 tailnet。
 
 完整步骤、Tailscale ACL、备份恢复、升级回滚与故障排查见
 [`docs/部署与运维.md`](docs/部署与运维.md)。

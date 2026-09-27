@@ -72,10 +72,13 @@ def _build_vevent(event: Event, tz_name: str) -> ICalEvent:
     if event.location:
         component.add("location", event.location)
 
-    stamp = as_aware_utc(utcnow())
-    component.add("dtstamp", stamp)
-    component.add("created", as_aware_utc(event.created_at) or stamp)
-    component.add("last-modified", as_aware_utc(event.updated_at) or stamp)
+    # DTSTAMP 取事件自身的修订时间,而不是“导出时刻”。
+    # 导出器靠内容哈希判断是否产生新版本;若 DTSTAMP 用挂钟时间,跨秒重新导出就会得到
+    # 不同哈希,于是“没有改动”的保存也会递增版本并向所有同步人员重发完整日历。
+    revision = as_aware_utc(event.updated_at) or as_aware_utc(utcnow())
+    component.add("dtstamp", revision)
+    component.add("created", as_aware_utc(event.created_at) or revision)
+    component.add("last-modified", revision)
     component.add("sequence", int(event.sequence or 0))
     component.add("status", (event.status or "confirmed").upper())
     component.add("class", "PRIVATE")

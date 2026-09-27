@@ -1,0 +1,8 @@
+﻿# Tailscale Serve 配置快照
+# 采集时间: 2026-09-27 09:53:02
+# 用途: 新增 /calendar 路由前的回退依据
+
+https://sisi-laptop.tail921448.ts.net (tailnet only)
+|-- /    proxy http://127.0.0.1:3081
+|-- /dsh proxy http://127.0.0.1:3081
+

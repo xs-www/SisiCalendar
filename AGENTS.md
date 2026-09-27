@@ -60,18 +60,31 @@ app/
    展示与 ICS 生成时再还原。见 `test_naive_input_uses_event_timezone`。
 2. **UID 创建后永不变更**;修改才递增 `sequence`,无实际变化不递增、不产生新版本。
    见 `test_uid_is_stable_across_exports`、`test_noop_update_does_not_create_new_version`。
-3. **发布文件只做原子替换**:先写同目录临时文件并 `fsync`,再 `os.replace`。
+3. **导出内容必须只取决于数据库状态,不能取决于导出时刻。**
+   导出器用内容哈希判断是否需要新版本,所以 `DTSTAMP` 等字段一律取事件自身的修订时间
+   (`updated_at`),绝不能取挂钟时间。否则跨秒重新导出会得到新哈希,导致没有改动的保存
+   也递增版本、并向所有同步人员重发完整日历。见 `test_content_is_deterministic_across_wall_clock`。
+4. **发布文件只做原子替换**:先写同目录临时文件并 `fsync`,再 `os.replace`。
    订阅端只能读到完整的旧文件或新文件。见 `test_atomic_replace_never_exposes_partial_file`。
-4. **导出失败不得丢数据**:事件与 `dirty` 先提交,再生成 ICS;失败时回滚导出事务并
+5. **导出失败不得丢数据**:事件与 `dirty` 先提交,再生成 ICS;失败时回滚导出事务并
    单独补记 `last_error`,订阅端继续返回最近的有效文件。见 `test_feed_serves_last_valid_file_when_export_fails`。
-5. **邮件任务幂等键是 `(export_version, recipient_id)`**,唯一约束在数据库层;
+6. **邮件任务幂等键是 `(export_version, recipient_id)`**,唯一约束在数据库层;
    附件永远取自该任务记录的不可变快照,重试不得改用更新版本。见 `tests/test_mail.py`。
-6. **SMTP 口令只来自环境变量**,不写数据库、不写日志、不回显;日志中的邮箱一律脱敏
+7. **SMTP 口令只来自环境变量**,不写数据库、不写日志、不回显;日志中的邮箱一律脱敏
    (`app/util.mask_email`)。见 `test_smtp_password_is_never_persisted`。
-7. **管理接口必须登录 + CSRF**;`/calendar` 与 `/calendar.ics` 只有 GET/HEAD 且公开。
-8. **全天事件的 `end_date_exclusive` 不含在事件内**;ICS 里 `DTEND` 是同义的不含边界日期。
-9. **默认时区相关查询**:`GET /api/v1/events` 只有显式给了 `start`/`end` 才做日期过滤,
-   否则关键词检索应覆盖全部事件。
+8. **管理接口必须登录 + CSRF**;`/calendar` 与 `/calendar.ics` 只有 GET/HEAD 且公开。
+9. **全天事件的 `end_date_exclusive` 不含在事件内**;ICS 里 `DTEND` 是同义的不含边界日期。
+10. **默认时区相关查询**:`GET /api/v1/events` 只有显式给了 `start`/`end` 才做日期过滤,
+    否则关键词检索应覆盖全部事件。
+
+## 部署时的两个陷阱
+
+- **Tailscale Serve 会剥掉挂载前缀**:`--set-path=/calendar` 会把 `/calendar/admin` 以 `/admin`
+  转发给后端。目标地址必须写成 `http://127.0.0.1:443/calendar`,否则管理界面会暴露给整个
+  tailnet。改完务必确认 `/calendar/login` 返回 404。详见《部署与运维》第 3 节。
+- **Docker NAT 让本机请求与代理请求同源**:容器内看到的对端都是 Docker 网关(`172.19.0.1`),
+  应用层无法区分「本机浏览器」与「经 Tailscale 来的请求」,因此管理面隔离只能靠挂载路径保证,
+  不要在应用里靠客户端地址做判断。
 
 ## 约定
 
