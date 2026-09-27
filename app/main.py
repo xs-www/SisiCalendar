@@ -41,6 +41,10 @@ SECURITY_HEADERS = {
 ADMIN_CSP = (
     "default-src 'self'; "
     "img-src 'self' data:; "
+    # FullCalendar 的图标字体(上/下月箭头)是内嵌的 base64 data URI。
+    # 不显式声明的 font-src 会回退到 default-src 'self',把字体拦掉,
+    # 按钮就会退化成方块(私有区码位没有字形)。
+    "font-src 'self' data:; "
     "style-src 'self' 'unsafe-inline'; "
     "script-src 'self'; "
     "connect-src 'self'; "

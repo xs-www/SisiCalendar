@@ -25,6 +25,12 @@ services:
 
     restart: unless-stopped
 
+    # 单用户、单进程服务的保守资源上限。实测前不建议低于 256 MiB，避免启动迁移、
+    # ICS 导出或邮件附件构造时触发 OOM；0.5 CPU 足以应对日常请求与后台任务。
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 64
+
     # 容器停止时给正在进行的数据库事务与 ICS 原子替换留出时间
     stop_grace_period: 30s
 
