@@ -8,8 +8,10 @@
 *.db-shm
 
 # 凭据
+# .env.* 覆盖 .env.before-*、.env.bak 这类手工备份——它们同样含 SMTP 口令与管理员口令
 .env
-.env.local
+.env.*
+!.env.example
 *.pem
 
 # Python
