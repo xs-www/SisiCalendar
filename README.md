@@ -13,15 +13,28 @@
 
 | 模块 | 能力 |
 |---|---|
-| 日程管理 | 月/周/日/列表视图,普通与全天事件,标题、地点、说明、状态、IANA 时区、重复规则与截止日期 |
+| 日程管理 | 月/周/日/列表视图,普通与全天事件,标题、地点、说明、状态、IANA 时区(可填序号/中文名)、重复规则与截止日期 |
 | 并发安全 | 基于 `updated_at` 的乐观锁,旧页面提交返回 409 而不是静默覆盖 |
 | ICS 发布 | RFC 5545 完整导出,UTC/`TZID`+`VTIMEZONE`,稳定 `UID`,递增 `SEQUENCE`,原子替换 |
 | 订阅接口 | `/calendar` 与 `/calendar.ics`,ETag、Last-Modified、`304`、HEAD,不做 HTML 重定向 |
 | 失败韧性 | 导出失败保留编辑、标记 `dirty`、每分钟自动修复,订阅端始终返回最近的有效文件 |
-| 邮件同步 | 持久化队列、`(版本, 收件人)` 幂等、逐人独立发送、退避重试、旧版附件隔离 |
+| 邮件同步 | 持久化队列、`(版本, 收件人)` 幂等、逐人独立发送、退避重试、旧版附件隔离,队列显示操作/发送时间 |
 | 安全 | Argon2id 口令、签名会话、CSRF 双提交、限流、严格 CSP、口令只从环境注入 |
 | 运维 | 健康/就绪检查、一致性自检、在线备份与恢复、Alembic 迁移、Docker Compose |
 | 远程 Agent | 可选的 Bearer 令牌接口,供外部 Agent 经 HTTP 新建日程;默认关闭,幂等键防重试重复 |
+
+### 时区怎么写
+
+`/admin/settings` 的默认时区是按地区分组的 30 项下拉框,每项带固定序号;事件与 Agent 接口的
+`timezone` 字段可以填 IANA 名、中文名或这个序号:
+
+```json
+{ "title": "和牙医的预约", "start_at": "2026-11-03T14:00", "timezone": 1 }
+```
+
+`1` = 北京时间、`11` = 悉尼时间、`12` = 布里斯班时间。序号只会在表尾追加,已发布的编号不会变。
+完整清单见 [`docs/static/app-timezones.md`](docs/static/app-timezones.md),
+接口形式见 `GET /api/v1/settings` 的 `timezone_choices`。
 
 ## 远程 Agent 接入(默认关闭)
 
@@ -72,12 +85,12 @@ uv run uvicorn app.main:app --reload --port 8443
 ## 测试
 
 ```powershell
-uv run pytest -q                 # 89 项测试
+uv run pytest -q                 # 178 项测试
 uv run ruff check app tests      # 静态检查
 ```
 
 覆盖 ICS 语义与时区/夏令时、事件 API 与并发冲突、订阅条件请求、原子替换与失败回退、
-邮件幂等与退避重试、备份恢复往返。验收标准逐条对照见
+邮件幂等与退避重试、时区序号解析、备份恢复往返。验收标准逐条对照见
 [`docs/验收测试记录.md`](docs/验收测试记录.md)。
 
 ## 部署

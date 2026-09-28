@@ -6,11 +6,27 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 RecurrenceChoice = Literal["none", "daily", "weekly", "monthly", "yearly"]
+
+
+def _timezone_before(value: Any) -> Any:
+    """允许把「序号」当字符串收下。
+
+    `timezone` 既接受 IANA 名,也接受设置页列出的序号(如 `1`)或中文名(如「北京时间」)。
+    JSON 里的数字先转成字符串,后续统一由 `app.timezones.resolve_timezone` 解析,
+    这样 `"timezone": 1` 与 `"timezone": "1"` 行为一致。
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(int(value)) if float(value).is_integer() else str(value)
+    return value
 
 
 class ErrorDetail(BaseModel):
@@ -34,7 +50,6 @@ class EventWrite(BaseModel):
     all_day: bool | None = None
     timezone: str | None = None
     status: Literal["confirmed", "tentative", "cancelled"] | None = None
-
     # 非全天事件
     start_at: str | None = None
     end_at: str | None = None
@@ -57,6 +72,9 @@ class EventWrite(BaseModel):
 
     # 幂等键:远程 Agent 重试时带上同一个值,服务端返回已存在的事件而不是重复创建
     client_ref: str | None = Field(default=None, max_length=200)
+
+    # timezone 可以填序号(如 1)或中文名(如「北京时间」),这里先收下再统一解析
+    _normalize_timezone = field_validator("timezone", mode="before")(_timezone_before)
 
 
 class EventRead(BaseModel):
@@ -120,6 +138,9 @@ class SettingsUpdate(BaseModel):
     default_event_duration_minutes: int | None = None
     mail_max_attempts: int | None = None
     mail_backoff_minutes: str | None = None
+
+    # 同 EventWrite.timezone:默认时区也允许填序号或中文名
+    _normalize_timezone = field_validator("default_timezone", mode="before")(_timezone_before)
 
 
 class MailTestRequest(BaseModel):

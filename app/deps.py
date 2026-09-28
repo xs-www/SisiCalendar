@@ -1,10 +1,11 @@
-﻿"""FastAPI 依赖:模板环境、登录校验与 CSRF 防护。"""
+"""FastAPI 依赖:模板环境、登录校验与 CSRF 防护。"""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -20,12 +21,32 @@ from app.security import (
     read_session,
     verify_csrf,
 )
+from app.timeutil import utc_to_local
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
 STATIC_DIR = PROJECT_ROOT / "static"
 
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def local_time_filter(
+    value: datetime | None, tz_name: str = "UTC", fmt: str = "%Y-%m-%d %H:%M"
+) -> str:
+    """模板过滤器 `localtime`:把库里的 naive UTC 时间按指定时区展示。
+
+    缺失值渲染成 `—`,与页面其它空值保持一致;时区名非法时退回 UTC 而不是抛错,
+    页面不该因为一条脏配置整页 500。
+    """
+    if value is None:
+        return "—"
+    try:
+        return utc_to_local(value, tz_name or "UTC").strftime(fmt)
+    except Exception:  # noqa: BLE001 - 展示层不对坏数据抛错
+        return utc_to_local(value, "UTC").strftime(fmt)
+
+
+templates.env.filters["localtime"] = local_time_filter
 
 
 class NotAuthenticated(Exception):

@@ -44,10 +44,14 @@
         </select>
       </label>
       <label class="field">
-        <span>时区 <em>IANA</em></span>
+        <span>时区 <em>IANA 名或序号</em></span>
         <input type="text" name="timezone" list="tz-list" value="{{ event.timezone or default_timezone }}">
       </label>
     </div>
+    <p class="hint">
+      时区可以填 IANA 名(如 <code>Asia/Shanghai</code>),也可以填设置页里的序号
+      (<code>1</code> = 北京时间、<code>11</code> = 悉尼时间)或中文名(如「北京时间」)。
+    </p>
 
     <div class="field-row" id="timed-fields">
       <label class="field">
@@ -112,6 +116,7 @@
   </form>
 
   <datalist id="tz-list">
+    {% for item in timezone_choices %}<option value="{{ item.iana }}" label="{{ item.index }}. {{ item.label }}"></option>{% endfor %}
     {% for zone in timezones %}<option value="{{ zone }}"></option>{% endfor %}
   </datalist>
 </section>

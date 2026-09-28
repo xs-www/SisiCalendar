@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.models import AppSetting
 from app.timeutil import is_valid_timezone
+from app.timezones import resolve_timezone, timezone_help
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +63,11 @@ def validate_overrides(values: dict[str, Any]) -> dict[str, str]:
             else:
                 cleaned[key] = text
         elif key == "default_timezone":
-            if not is_valid_timezone(text):
-                errors[key] = f"未知的 IANA 时区名:{text}"
+            resolved_zone = resolve_timezone(text)
+            if resolved_zone is None:
+                errors[key] = timezone_help(text)
             else:
-                cleaned[key] = text
+                cleaned[key] = resolved_zone
         elif key in INT_KEYS:
             try:
                 number = int(text)

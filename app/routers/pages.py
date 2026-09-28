@@ -34,30 +34,19 @@ from app.settings_store import (
 )
 from app.sync_service import generated_at_display, overview, publish
 from app.timeutil import iso_utc, parse_date, parse_iso, utc_to_local, utcnow
+from app.timezones import (
+    TIMEZONE_CHOICES,
+    iana_names,
+    known_iana_names,
+    timezone_groups,
+)
 from app.util import mask_email
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["pages"])
 
-COMMON_TIMEZONES = [
-    "Australia/Brisbane",
-    "Australia/Sydney",
-    "Australia/Melbourne",
-    "Australia/Perth",
-    "Asia/Shanghai",
-    "Asia/Hong_Kong",
-    "Asia/Tokyo",
-    "Asia/Singapore",
-    "Europe/London",
-    "Europe/Berlin",
-    "Europe/Paris",
-    "America/New_York",
-    "America/Chicago",
-    "America/Denver",
-    "America/Los_Angeles",
-    "UTC",
-]
+COMMON_TIMEZONES = list(iana_names())
 
 SYNC_STATE_LABELS = {
     "pending": "待发送",
@@ -81,6 +70,22 @@ def all_timezones() -> tuple[str, ...]:
         return tuple(sorted(available_timezones()))
     except Exception:  # noqa: BLE001 - 缺少 tzdata 时退回常用列表
         return tuple(COMMON_TIMEZONES)
+
+
+def _timezone_context(current: str | None = None) -> dict[str, object]:
+    """时区下拉框需要的数据:常用清单(带序号)+ 完整 IANA 列表。
+
+    `current` 用于把当前值标记为 `selected`;不在常用清单里的自定义值由模板
+    单独补一个选项,避免打开设置页就把用户的时区悄悄改掉。
+    """
+    return {
+        "timezones": all_timezones(),
+        "common_timezones": COMMON_TIMEZONES,
+        "timezone_choices": TIMEZONE_CHOICES,
+        "timezone_groups": timezone_groups(),
+        "timezone_known": known_iana_names(),
+        "current_timezone": (current or "").strip(),
+    }
 
 
 def _recipients(session: Session) -> list[SyncRecipient]:
@@ -215,9 +220,8 @@ def event_new_page(
             "recurrence_simple": "none",
             "recurrence_until": "",
             "mode": "create",
-            "timezones": all_timezones(),
-            "common_timezones": COMMON_TIMEZONES,
             "recurrence_labels": SIMPLE_LABELS,
+            **_timezone_context(settings.default_timezone),
         }
     )
     return templates.TemplateResponse(request, "event_form.html", context)
@@ -243,9 +247,8 @@ def event_edit_page(
             "recurrence_simple": simple,
             "recurrence_until": until,
             "mode": "edit",
-            "timezones": all_timezones(),
-            "common_timezones": COMMON_TIMEZONES,
             "recurrence_labels": SIMPLE_LABELS,
+            **_timezone_context(str(payload.get("timezone") or settings.default_timezone)),
         }
     )
     return templates.TemplateResponse(request, "event_form.html", context)
@@ -264,7 +267,7 @@ def settings_page(
         {
             "overrides": overrides,
             "recipients": _recipients(session),
-            "timezones": all_timezones(),
+            **_timezone_context(overrides.get("default_timezone", settings.default_timezone)),
             "smtp": {
                 "host": settings.smtp_host or "",
                 "port": settings.smtp_port,
@@ -485,7 +488,7 @@ def save_settings_action(
                 "csrf_token": admin.csrf_token,
                 "settings": refreshed,
                 "overrides": load_overrides(session),
-                "timezones": all_timezones(),
+                **_timezone_context(refreshed.default_timezone),
                 "notice": None,
                 "error": "保存失败:" + ";".join(exc.fields.values()),
             },
@@ -502,7 +505,7 @@ def save_settings_action(
             "csrf_token": admin.csrf_token,
             "settings": refreshed,
             "overrides": load_overrides(session),
-            "timezones": all_timezones(),
+            **_timezone_context(refreshed.default_timezone),
             "notice": "设置已保存。",
             "error": None,
         },
@@ -706,6 +709,8 @@ def _sync_partial(
             "deliveries": _deliveries(session),
             "status_labels": SYNC_STATE_LABELS,
             "change_labels": CHANGE_LABELS,
+            # 邮件队列里的时间按日历默认时区展示,避免只看到 UTC 还要自己换算
+            "default_timezone": settings.default_timezone,
             "notice": notice,
             "error": error,
         },
@@ -730,6 +735,7 @@ def settings_form_partial(
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
+    overrides = load_overrides(session)
     return templates.TemplateResponse(
         request,
         "partials/settings_form.html",
@@ -737,12 +743,19 @@ def settings_form_partial(
             "request": request,
             "csrf_token": admin.csrf_token,
             "settings": settings,
-            "overrides": load_overrides(session),
-            "timezones": all_timezones(),
+            "overrides": overrides,
+            **_timezone_context(overrides.get("default_timezone", settings.default_timezone)),
             "notice": None,
             "error": None,
         },
     )
 
 
-__all__ = ["router", "all_timezones", "SYNC_STATE_LABELS", "CHANGE_LABELS", "get_state"]
+__all__ = [
+    "router",
+    "all_timezones",
+    "timezone_groups",
+    "SYNC_STATE_LABELS",
+    "CHANGE_LABELS",
+    "get_state",
+]

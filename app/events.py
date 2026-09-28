@@ -39,6 +39,7 @@ from app.timeutil import (
     utc_to_local,
     utcnow,
 )
+from app.timezones import resolve_timezone, timezone_help
 
 logger = logging.getLogger(__name__)
 
@@ -147,11 +148,16 @@ def normalize_event_input(
     all_day = bool(payload.all_day) if "all_day" in provided else bool(current("all_day", False))
 
     if "timezone" in provided and payload.timezone is not None:
-        timezone = payload.timezone.strip()
+        # timezone 允许填 IANA 名、中文名或设置页列出的序号:统一解析成 IANA 名
+        resolved_timezone = resolve_timezone(payload.timezone)
+        if resolved_timezone is None:
+            errors["timezone"] = timezone_help(payload.timezone)
+            resolved_timezone = _default_timezone(resolved)
+        timezone = resolved_timezone
     else:
         timezone = str(current("timezone") or _default_timezone(resolved))
     if not is_valid_timezone(timezone):
-        errors["timezone"] = f"未知的 IANA 时区名:{timezone}"
+        errors["timezone"] = timezone_help(timezone)
 
     # ---------- 时间 ----------
     start_at_utc: datetime | None = None

@@ -20,6 +20,7 @@ from app.settings_store import (
     load_overrides,
     save_overrides,
 )
+from app.timezones import timezone_choices
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ def _serialize(session: Session) -> dict[str, object]:
         "subscription_url": settings.subscription_url,
         "feed_cache_seconds": settings.feed_cache_seconds,
         "mail_configured": settings.mail_configured,
+        # 常用时区清单:event 接口的 timezone 可以直接填这里的 index
+        "timezone_choices": timezone_choices(),
         "overrides": load_overrides(session),
         "smtp": {
             "host": settings.smtp_host or "",

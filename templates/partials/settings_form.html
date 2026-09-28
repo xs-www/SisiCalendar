@@ -19,10 +19,28 @@
   </label>
 
   <label class="field">
-    <span>默认时区</span>
-    <input type="text" name="default_timezone" list="tz-list-settings"
-           value="{{ overrides.get('default_timezone', settings.default_timezone) }}">
+    <span>默认时区 <em>序号可被 event 接口直接使用</em></span>
+    <select name="default_timezone" id="default-timezone">
+      {% for region, items in timezone_groups %}
+        <optgroup label="{{ region }}">
+          {% for item in items %}
+            <option value="{{ item.iana }}" {{ 'selected' if item.iana == current_timezone else '' }}>
+              {{ item.index }}. {{ item.label }}({{ item.iana }})
+            </option>
+          {% endfor %}
+        </optgroup>
+      {% endfor %}
+      {% if current_timezone and current_timezone not in timezone_known %}
+        <option value="{{ current_timezone }}" selected>
+          {{ current_timezone }}(当前值,不在常用清单中)
+        </option>
+      {% endif %}
+    </select>
   </label>
+  <p class="hint">
+    新建日程默认用这个时区。写快捷指令或脚本时,<code>timezone</code> 可以直接填上面的序号
+    (如 <code>1</code> = 北京时间、<code>11</code> = 悉尼时间),也可以填 IANA 名或中文名。
+  </p>
 
   <div class="field-row">
     <label class="field">
@@ -46,8 +64,4 @@
   <div class="form-actions">
     <button type="submit" class="button primary">保存设置</button>
   </div>
-
-  <datalist id="tz-list-settings">
-    {% for zone in timezones %}<option value="{{ zone }}"></option>{% endfor %}
-  </datalist>
 </form>

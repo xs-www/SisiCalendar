@@ -55,11 +55,13 @@
     </header>
 
     {% if deliveries %}
+      <p class="hint">「操作时间」为任务创建时刻;时间均按日历默认时区 {{ default_timezone }} 显示。</p>
       <table class="table">
         <thead>
           <tr>
             <th>版本</th><th>收件人</th><th>类型</th><th>状态</th>
-            <th>尝试</th><th>下次重试</th><th>错误</th><th>操作</th>
+            <th>尝试</th><th>操作时间</th><th>发送时间</th><th>下次重试</th>
+            <th>错误</th><th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -74,7 +76,9 @@
                 </span>
               </td>
               <td>{{ delivery.attempt_count }}</td>
-              <td>{{ delivery.next_attempt_at.strftime('%Y-%m-%d %H:%M') if delivery.next_attempt_at else '—' }}</td>
+              <td title="{{ delivery.created_at | localtime(default_timezone, '%Y-%m-%d %H:%M:%S') }} {{ default_timezone }}">{{ delivery.created_at | localtime(default_timezone) }}</td>
+              <td{% if delivery.sent_at %} title="{{ delivery.sent_at | localtime(default_timezone, '%Y-%m-%d %H:%M:%S') }} {{ default_timezone }}"{% endif %}>{{ delivery.sent_at | localtime(default_timezone) }}</td>
+              <td{% if delivery.next_attempt_at %} title="{{ delivery.next_attempt_at | localtime(default_timezone, '%Y-%m-%d %H:%M:%S') }} {{ default_timezone }}"{% endif %}>{{ delivery.next_attempt_at | localtime(default_timezone) }}</td>
               <td class="ellipsis" title="{{ delivery.error_message or '' }}">{{ delivery.error_message or '—' }}</td>
               <td>
                 {% if delivery.status != 'sent' %}
