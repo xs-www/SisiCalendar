@@ -1,0 +1,77 @@
+<div id="agent-tokens" class="agent-tokens">
+  {% if new_token %}
+    <div class="alert ok">
+      <strong>令牌明文只显示这一次,请立即复制保存:</strong>
+      <input class="mono token-reveal" readonly value="{{ new_token }}">
+      <span class="hint">在快捷指令或脚本里以 <code>Authorization: Bearer {{ new_token[:8] }}…</code> 的形式使用;离开此页面后无法再查看明文。</span>
+    </div>
+  {% endif %}
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <form hx-post="/admin/partials/tokens"
+        hx-target="#agent-tokens"
+        hx-swap="outerHTML"
+        class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="inline-form">
+      <label class="field grow">
+        <span>名称 <em>如:iPhone 快捷指令</em></span>
+        <input type="text" name="label" maxlength="100" required placeholder="iPhone 快捷指令">
+      </label>
+      <button type="submit" class="button primary">生成令牌</button>
+    </div>
+    <label class="checkbox warn-check">
+      <input type="checkbox" name="acknowledge" value="1" required>
+      <span>我确认:该令牌持有者可远程新建日程,并触发向同步人员发送完整日历邮件。</span>
+    </label>
+  </form>
+
+  {% if tokens %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>名称</th><th>指纹</th><th>状态</th><th>创建时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for token in tokens %}
+          <tr class="{{ '' if token.enabled else 'muted-row' }}">
+            <td>
+              <form hx-post="/admin/partials/tokens/{{ token.id }}"
+                    hx-target="#agent-tokens" hx-swap="outerHTML" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="text" name="label" value="{{ token.label }}" maxlength="100">
+                <button type="submit" class="button ghost small">改名</button>
+              </form>
+            </td>
+            <td class="mono" title="审计日志里以 agent:{{ token.token_hash[:16] }} 出现">{{ token.token_hash[:16] }}…</td>
+            <td>
+              <span class="chip {{ 'ok' if token.enabled else '' }}">
+                {{ '已启用' if token.enabled else '已停用' }}
+              </span>
+            </td>
+            <td>{{ token.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td class="row-actions">
+              <form hx-post="/admin/partials/tokens/{{ token.id }}/toggle"
+                    hx-target="#agent-tokens" hx-swap="outerHTML" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="button ghost small">
+                  {{ '停用' if token.enabled else '启用' }}
+                </button>
+              </form>
+              <form hx-post="/admin/partials/tokens/{{ token.id }}/delete"
+                    hx-target="#agent-tokens" hx-swap="outerHTML" class="inline"
+                    hx-confirm="确定撤销「{{ token.label }}」吗?撤销后该令牌立即失效,无法恢复。">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="button danger small">撤销</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">还没有平台管理的令牌。环境变量 <code>AGENT_API_TOKEN</code> 里的令牌仍作为兜底一并生效。</p>
+  {% endif %}
+</div>

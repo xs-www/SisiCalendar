@@ -27,6 +27,19 @@ code, .mono {
   font-size: .92em;
 }
 
+/* 令牌明文只在创建时出现一次:整行只读输入框,方便手动选中复制 */
+.token-reveal {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--ink);
+}
+
 a { color: var(--primary); text-decoration: none; }
 a:hover { text-decoration: underline; }
 

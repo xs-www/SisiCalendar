@@ -22,6 +22,7 @@
 | 安全 | Argon2id 口令、签名会话、CSRF 双提交、限流、严格 CSP、口令只从环境注入 |
 | 运维 | 健康/就绪检查、一致性自检、在线备份与恢复、Alembic 迁移、Docker Compose |
 | 远程 Agent | 可选的 Bearer 令牌接口,供外部 Agent 经 HTTP 新建日程;默认关闭,幂等键防重试重复 |
+| 接入令牌 | 在设置页创建/改名/停用/撤销远程令牌;库内只存 `sha256`,明文只显示一次;`.env` 令牌仍作兜底 |
 
 ### 时区怎么写
 
@@ -38,11 +39,16 @@
 
 ## 远程 Agent 接入(默认关闭)
 
-给本机之外的脚本或 Agent 一个写入入口。未配置 `AGENT_API_TOKEN` 时接口返回 404,等同不存在。
+给本机之外的脚本或 Agent 一个写入入口。**两个来源都没有令牌时**(`.env` 的 `AGENT_API_TOKEN`
+为空且平台内没有启用的令牌)接口返回 404,等同不存在。
+
+令牌可以在 **设置 → 远程接入令牌** 里创建和管理:填个名称 → 生成 → 页面显示**一次性明文**
+(复制保存,之后只能看到指纹)→ 可随时改名、停用、撤销。数据库里只保存 `sha256(token)` 哈希,
+明文不进库、不进日志;`.env` 里的 `AGENT_API_TOKEN` 仍然生效,作为兜底与恢复通道。
 
 ```powershell
 curl.exe -X POST https://sisi-laptop.tail921448.ts.net/agent/events `
-  -H "Authorization: Bearer <AGENT_API_TOKEN>" `
+  -H "Authorization: Bearer <令牌>" `
   -H "Content-Type: application/json; charset=utf-8" `
   --data-binary "@event.json"
 ```
@@ -62,7 +68,7 @@ curl.exe -X POST https://sisi-laptop.tail921448.ts.net/agent/events `
 
 ```text
 POST https://sisi-laptop.tail921448.ts.net/agent/events
-Authorization: Bearer <AGENT_API_TOKEN>
+Authorization: Bearer <令牌>
 Content-Type: application/x-www-form-urlencoded
 
 title=和客户喝咖啡&start_at=2026-11-06 14:00&duration_minutes=90
@@ -85,7 +91,7 @@ uv run uvicorn app.main:app --reload --port 8443
 ## 测试
 
 ```powershell
-uv run pytest -q                 # 178 项测试
+uv run pytest -q                 # 191 项测试
 uv run ruff check app tests      # 静态检查
 ```
 

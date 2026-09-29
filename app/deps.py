@@ -11,8 +11,10 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.templating import Jinja2Templates
+from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
+from app.db import get_db
 from app.security import (
     CSRF_FORM_FIELD,
     CSRF_HEADER_NAME,
@@ -22,6 +24,7 @@ from app.security import (
     verify_csrf,
 )
 from app.timeutil import utc_to_local
+from app.token_store import enabled_hashes
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES_DIR = PROJECT_ROOT / "templates"
@@ -166,14 +169,23 @@ def _bearer_from(request: Request) -> str:
     return ""
 
 
-def require_agent_token(request: Request) -> AgentPrincipal:
+def require_agent_token(
+    request: Request, session: Session = Depends(get_db)
+) -> AgentPrincipal:
     """校验 `Authorization: Bearer <token>`。
 
-    未配置任何令牌时,整个 `/api/agent` 视为不存在,返回 404 而不是 401,
+    令牌有两个来源,取并集:
+
+    - `.env` 里的 `AGENT_API_TOKEN`(逗号分隔多个)——兜底/恢复通道;
+    - 数据库里 `agent_tokens` 表里启用且哈希匹配的令牌(平台内管理)。
+
+    两个来源都没有任何令牌时,整个 `/api/agent` 视为不存在,返回 404 而不是 401,
     避免向未授权方暴露「这里有一个需要凭据的接口」。
     """
-    tokens = get_settings().agent_tokens
-    if not tokens:
+    settings = get_settings()
+    env_tokens = settings.agent_tokens
+    db_hashes = enabled_hashes(session)
+    if not env_tokens and not db_hashes:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error": {"code": "not_found", "message": "Not Found", "fields": None}},
@@ -181,10 +193,17 @@ def require_agent_token(request: Request) -> AgentPrincipal:
 
     provided = _bearer_from(request)
     if provided:
-        for token in tokens:
+        # env 里的令牌以明文存放,直接常量时间比对
+        for token in env_tokens:
             if hmac.compare_digest(provided, token):
-                digest = hashlib.sha256(provided.encode()).hexdigest()[:16]
-                return AgentPrincipal(fingerprint=digest)
+                return AgentPrincipal(
+                    fingerprint=hashlib.sha256(provided.encode()).hexdigest()[:16]
+                )
+        # 数据库里的令牌只存哈希:比对 sha256(明文) == 已存哈希
+        digest = hashlib.sha256(provided.encode()).hexdigest()
+        for stored in db_hashes:
+            if hmac.compare_digest(digest, stored):
+                return AgentPrincipal(fingerprint=digest[:16])
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

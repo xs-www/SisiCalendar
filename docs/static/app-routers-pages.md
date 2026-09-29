@@ -50,6 +50,50 @@
 - **本次变更**:无(仍按 `created_at` 倒序取最近 30 条);新增列直接使用已有的
   `created_at` / `sent_at`,**不需要数据库迁移**
 
+## 新增:远程接入令牌管理片段(HTMX)
+
+路由位于 `app/routers/pages.py:472` 起,渲染 `templates/partials/tokens.html`,
+目标元素 `#agent-tokens`,与「同步人员」片段(`#recipients`)同构。
+
+### `_token_partial(request, session, settings, *, notice, error, status_code, new_token) -> Response`
+
+- **位置**:`app/routers/pages.py:475`
+- **用途**:统一渲染令牌片段
+- **上下文**:`tokens`(`token_store.list_tokens`)、`csrf_token`、`default_timezone`、
+  `new_token`(仅创建成功那一次非空)、`notice`、`error`
+- **不变量**:`new_token` 只允许出现在**创建成功的响应**里;任何后续渲染都必须为 `None`,
+  否则明文会在页面里反复出现
+
+### `GET /admin/partials/tokens`
+
+- **位置**:`app/routers/pages.py:501`;依赖 `AdminDep`(需登录)
+- **用途**:列出全部令牌(含已停用)
+
+### `POST /admin/partials/tokens`
+
+- **位置**:`app/routers/pages.py:511`;依赖 `CsrfDep`(需登录 + CSRF)
+- **表单**:`label`、`acknowledge`
+- **行为**:未勾选 `acknowledge` → 422;`label` 空或超长 → 422;成功 → 200 且响应内含一次性明文
+- **副作用**:写库(只写哈希)、审计 `agent_token_add`(detail 为令牌 id,**不含明文**)
+- **测试**:`tests/test_agent_tokens.py::test_plaintext_is_shown_once_and_only_hash_is_stored`、
+  `::test_creation_requires_acknowledgement_and_label`、`::test_plaintext_never_reaches_logs`
+
+### `POST /admin/partials/tokens/{token_id}` / `.../toggle` / `.../delete`
+
+- **位置**:`app/routers/pages.py:544` / `:572` / `:600`
+- **用途**:改名、启用/停用、撤销(硬删除)
+- **行为**:id 不存在 → 404;改名校验失败 → 422 且不写入
+- **副作用**:写库 + 审计 `agent_token_rename` / `agent_token_toggle` / `agent_token_revoke`
+- **说明**:撤销后该令牌**下一次请求即失效**;若因此一枚不剩,`/api/agent` 回到 404
+- **测试**:`tests/test_agent_tokens.py::test_token_can_be_renamed`、
+  `::test_disabled_token_is_rejected_and_can_be_reenabled`、
+  `::test_revoked_token_stops_working_immediately`、`::test_unknown_token_id_returns_404`
+
+### `settings_page` 上下文
+
+- **位置**:`app/routers/pages.py:277`
+- **本次变更**:新增 `"tokens": token_store.list_tokens(session)`,供设置页直接渲染令牌卡片
+
 ## `__all__`
 
 - **位置**:`app/routers/pages.py:754`
@@ -59,3 +103,4 @@
 
 - 2026-09-29:新增 `_timezone_context`;`COMMON_TIMEZONES` 改为清单派生;
   邮件队列上下文补充 `default_timezone`。
+- 2026-09-29:新增远程接入令牌管理片段(`#agent-tokens`)与 `settings_page` 的 `tokens` 上下文。

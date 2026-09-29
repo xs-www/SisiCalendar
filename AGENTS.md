@@ -14,7 +14,8 @@
 
 ```powershell
 uv sync                                   # 安装依赖(需要 uv)
-uv run alembic upgrade head               # 手动迁移(应用启动时也会自动执行)
+uv run alembic upgrade head               # 手动迁移:url 写死在 alembic.ini,固定 ./data/calendar.db
+                                          # 它**不读 DATA_DIR**,别在测试副本上用它(会打到真实库)
 uv run uvicorn app.main:app --reload      # 本机开发
 uv run pytest -q                          # 全量测试
 uv run ruff check app tests --fix         # 静态检查
@@ -45,6 +46,7 @@ app/
 ├─ mailer.py        SMTP 连接与 MIME 构造
 ├─ mailqueue.py     持久化发信队列、幂等、退避重试
 ├─ settings_store.py 非敏感配置覆盖
+├─ token_store.py   远程接入令牌(只存 sha256,明文只在创建时返回一次)
 ├─ scheduler.py     后台任务(ICS 修复、队列轮询、快照清理)
 ├─ backup.py        在线备份、恢复、清理
 ├─ bootstrap.py     迁移与启动检查
@@ -77,9 +79,13 @@ app/
 10. **默认时区相关查询**:`GET /api/v1/events` 只有显式给了 `start`/`end` 才做日期过滤,
     否则关键词检索应覆盖全部事件。
 11. **远程 Agent 接口(`/api/agent`)**只认 `Authorization: Bearer`,不接受 Cookie 会话
-    (因此没有 CSRF 面,也意味着已登录会话不能调用它);`AGENT_API_TOKEN` 为空时整段返回 404
+    (因此没有 CSRF 面,也意味着已登录会话不能调用它);令牌有两个来源并**取并集**——
+    `.env` 的 `AGENT_API_TOKEN` 与数据库 `agent_tokens` 表;两个来源都没有令牌时整段返回 404
     而不是 401,避免暴露接口存在;`client_ref` 命中时必须原样返回既有事件,不得新建、
     不得重新导出、不得发信。见 `tests/test_api_agent.py`。
+12. **远程接入令牌只存 `sha256` 哈希**:明文仅允许出现在**创建成功那一次响应**里,
+    之后不得回显;库、日志、审计 detail 中都不允许出现明文,页面只展示指纹
+    (哈希前 16 位,与审计日志 `agent:<指纹>` 一致)。见 `tests/test_agent_tokens.py`。
 
 ## 部署时的两个陷阱
 

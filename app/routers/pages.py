@@ -16,6 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import token_store
 from app.config import Settings
 from app.db import get_db
 from app.deps import AdminDep, CsrfDep, templates
@@ -267,6 +268,7 @@ def settings_page(
         {
             "overrides": overrides,
             "recipients": _recipients(session),
+            "tokens": token_store.list_tokens(session),
             **_timezone_context(overrides.get("default_timezone", settings.default_timezone)),
             "smtp": {
                 "host": settings.smtp_host or "",
@@ -451,6 +453,164 @@ def remove_recipient(
     session.commit()
     AuditLog.record("recipient_remove", "success", actor=admin.username, detail=masked)
     return _recipient_partial(request, session, settings, notice=f"已移除 {masked}")
+
+
+# --------------------------------------------------------------------------
+# HTMX 局部片段:远程接入令牌
+# --------------------------------------------------------------------------
+def _token_partial(
+    request: Request,
+    session: Session,
+    settings: Settings,
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+    new_token: str | None = None,
+) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "partials/tokens.html",
+        {
+            "request": request,
+            "tokens": token_store.list_tokens(session),
+            "csrf_token": _csrf_of(request),
+            "default_timezone": settings.default_timezone,
+            "new_token": new_token,
+            "notice": notice,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/admin/partials/tokens", response_class=HTMLResponse, include_in_schema=False)
+def tokens_partial(
+    request: Request,
+    admin: AdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    return _token_partial(request, session, settings)
+
+
+@router.post("/admin/partials/tokens", response_class=HTMLResponse, include_in_schema=False)
+def add_token(
+    request: Request,
+    admin: CsrfDep,
+    session: Session = Depends(get_db),
+    label: str = Form(default=""),
+    acknowledge: str = Form(default=""),
+) -> Response:
+    settings = effective_settings(session)
+    if not acknowledge:
+        return _token_partial(
+            request,
+            session,
+            settings,
+            error="请先勾选确认:该令牌持有者可远程新建日程并触发邮件同步。",
+            status_code=422,
+        )
+    try:
+        plaintext, row = token_store.create_token(session, label)
+    except SettingValidationError as exc:
+        session.rollback()
+        return _token_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("agent_token_add", "success", actor=admin.username, detail=row.id)
+    return _token_partial(
+        request,
+        session,
+        settings,
+        new_token=plaintext,
+        notice=f"令牌已创建(指纹 {row.token_hash[:16]})",
+    )
+
+
+@router.post(
+    "/admin/partials/tokens/{token_id}", response_class=HTMLResponse, include_in_schema=False
+)
+def rename_token_route(
+    token_id: str,
+    request: Request,
+    admin: CsrfDep,
+    session: Session = Depends(get_db),
+    label: str = Form(default=""),
+) -> Response:
+    settings = effective_settings(session)
+    token = token_store.get_token(session, token_id)
+    if token is None:
+        return _token_partial(
+            request, session, settings, error="令牌不存在。", status_code=404
+        )
+    try:
+        token_store.rename(session, token, label)
+    except SettingValidationError as exc:
+        session.rollback()
+        return _token_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("agent_token_rename", "success", actor=admin.username, detail=token.id)
+    return _token_partial(request, session, settings, notice=f"已改名:{token.label}")
+
+
+@router.post(
+    "/admin/partials/tokens/{token_id}/toggle",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def toggle_token(
+    token_id: str,
+    request: Request,
+    admin: CsrfDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    token = token_store.get_token(session, token_id)
+    if token is None:
+        return _token_partial(
+            request, session, settings, error="令牌不存在。", status_code=404
+        )
+    token_store.set_enabled(session, token, not token.enabled)
+    session.commit()
+    state = "已启用" if token.enabled else "已停用"
+    AuditLog.record("agent_token_toggle", state, actor=admin.username, detail=token.id)
+    return _token_partial(request, session, settings, notice=f"{token.label} {state}")
+
+
+@router.post(
+    "/admin/partials/tokens/{token_id}/delete",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def revoke_token(
+    token_id: str,
+    request: Request,
+    admin: CsrfDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    token = token_store.get_token(session, token_id)
+    if token is None:
+        return _token_partial(
+            request, session, settings, error="令牌不存在。", status_code=404
+        )
+    label = token.label
+    token_store.delete(session, token)
+    session.commit()
+    AuditLog.record("agent_token_revoke", "success", actor=admin.username, detail=token_id)
+    return _token_partial(request, session, settings, notice=f"已撤销:{label}")
 
 
 # --------------------------------------------------------------------------

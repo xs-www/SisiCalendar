@@ -28,7 +28,8 @@
 | [`app-schemas.md`](app-schemas.md) | `app/schemas.py` |
 | [`app-events.md`](app-events.md) | `app/events.py` |
 | [`app-settings-store.md`](app-settings-store.md) | `app/settings_store.py` |
-| [`app-deps.md`](app-deps.md) | `app/deps.py`(模板过滤器 `localtime`) |
+| [`app-token-store.md`](app-token-store.md) | `app/token_store.py`(新增:远程接入令牌,哈希存放) |
+| [`app-deps.md`](app-deps.md) | `app/deps.py`(模板过滤器 `localtime`、Agent 令牌鉴权) |
 | [`app-routers-pages.md`](app-routers-pages.md) | `app/routers/pages.py` |
 | [`app-routers-api-settings.md`](app-routers-api-settings.md) | `app/routers/api_settings.py` |
 | [`templates.md`](templates.md) | `templates/`(设置页、事件表单、邮件队列片段) |

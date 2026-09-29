@@ -232,3 +232,27 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=utcnow, onupdate=utcnow
     )
+
+
+class AgentToken(Base):
+    """远程 Agent 接入令牌。
+
+    只存 `sha256(token)` 哈希,明文不在库中:创建时把明文返回给界面一次即丢弃,
+    之后只能看到指纹(哈希前 16 位,与审计日志 `agent:<指纹>` 对得上)。
+    与 `.env` 里的 `AGENT_API_TOKEN` 取并集鉴权,env 作为兜底/恢复通道。
+    """
+
+    __tablename__ = "agent_tokens"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    token_hash: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=utcnow, onupdate=utcnow
+    )

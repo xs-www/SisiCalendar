@@ -41,4 +41,17 @@
   </p>
   {% include "partials/recipients.html" %}
 </section>
+
+<section class="card">
+  <header class="card-head">
+    <h2>远程接入令牌</h2>
+    <span class="chip">{% if tokens %}已配置 {{ tokens|length }} 枚{% else %}仅 .env 兜底{% endif %}</span>
+  </header>
+  <p class="hint">
+    供 iPhone 快捷指令、脚本或自动化 Agent 调用 <code>/api/agent</code> 使用。
+    <strong>明文只在生成时显示一次</strong>,数据库只保存 <code>sha256</code> 哈希,
+    因此丢失后只能撤销重建。环境变量 <code>AGENT_API_TOKEN</code> 中的令牌仍作为兜底一并生效。
+  </p>
+  {% include "partials/tokens.html" %}
+</section>
 {% endblock %}
