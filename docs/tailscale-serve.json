@@ -1,0 +1,31 @@
+{
+  "TCP": {
+    "443": {
+      "HTTPS": true
+    }
+  },
+  "Web": {
+    "${TS_CERT_DOMAIN}:443": {
+      "Handlers": {
+        "/": {
+          "Proxy": "http://127.0.0.1:3081"
+        },
+        "/dsh": {
+          "Proxy": "http://127.0.0.1:3081"
+        },
+        "/agent": {
+          "Proxy": "http://127.0.0.1:443/api/agent"
+        },
+        "/calendar": {
+          "Proxy": "http://127.0.0.1:443/calendar"
+        },
+        "/calendar.ics": {
+          "Proxy": "http://127.0.0.1:443/calendar.ics"
+        }
+      }
+    }
+  },
+  "AllowFunnel": {
+    "${TS_CERT_DOMAIN}:443": false
+  }
+}
