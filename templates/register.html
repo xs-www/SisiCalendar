@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>注册 · {{ calendar_name }}</title>
+  <link rel="stylesheet" href="{{ asset('css/app.css') }}">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="{{ bp() }}/register">
+    <h1>{{ calendar_name }}</h1>
+    <p class="muted">用家庭管理员给的邀请码自助注册</p>
+
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+    <input type="hidden" name="csrf_token" value="{{ login_csrf }}">
+
+    <label>邀请码
+      <input type="text" name="code" value="{{ code }}" autocomplete="off" required autofocus>
+    </label>
+    <label>用户名
+      <input type="text" name="username" value="{{ username }}" autocomplete="username" required>
+    </label>
+    <label>显示名 <span class="muted">可选</span>
+      <input type="text" name="display_name" value="{{ display_name }}" maxlength="100"
+             autocomplete="name" placeholder="家人看到的名字">
+    </label>
+    <label>邮箱 <span class="muted">必填 · 用于收验证码</span>
+      <input type="email" name="email" value="{{ email }}" maxlength="320"
+             autocomplete="email" placeholder="name@example.com" required>
+    </label>
+    <label>口令
+      <input type="password" name="password" autocomplete="new-password" required>
+    </label>
+    <label>确认口令
+      <input type="password" name="password_confirm" autocomplete="new-password" required>
+    </label>
+
+    <button type="submit" class="primary wide">注册并发送验证码</button>
+    <p class="hint">
+      邀请码由家庭管理员在「成员」页生成,有过期时间与使用次数限制。
+      注册后需要到「邮箱验证」页填入收到的 6 位验证码:验证通过后账号才能使用,
+      系统随后会把<strong>属于你的固定订阅地址</strong>发到该邮箱。
+    </p>
+    <p class="hint">已经有账号了?<a href="{{ bp() }}/login">返回登录</a></p>
+  </form>
+</body>
+</html>

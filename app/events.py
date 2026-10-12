@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from typing import TYPE_CHECKING
 
 from dateutil.rrule import rrulestr
 from sqlalchemy import func, or_, select
@@ -26,6 +27,12 @@ from app.recurrence import (
     describe_rrule,
     rebuild_rule,
     validate_rrule,
+)
+from app.reminders import (
+    dump_reminders,
+    normalize_reminders,
+    reminder_labels,
+    serialize_reminders,
 )
 from app.schemas import EventWrite
 from app.timeutil import (
@@ -41,11 +48,15 @@ from app.timeutil import (
 )
 from app.timezones import resolve_timezone, timezone_help
 
+if TYPE_CHECKING:  # pragma: no cover - 仅用于类型标注,避免运行期循环导入
+    from app.accounts import CalendarAccess
+
 logger = logging.getLogger(__name__)
 
 MAX_TITLE = 200
 MAX_DESCRIPTION = 10000
 MAX_LOCATION = 500
+MAX_URL = 1000
 
 # 单次范围查询展开的重复实例上限,避免无限重复规则拖垮界面
 MAX_OCCURRENCES = 2000
@@ -136,6 +147,26 @@ def normalize_event_input(
             errors["location"] = f"地点最多 {MAX_LOCATION} 个字符"
     else:
         location = current("location")  # type: ignore[assignment]
+
+    url: str | None
+    if "url" in provided:
+        url = (payload.url or "").strip() or None
+        if url and len(url) > MAX_URL:
+            errors["url"] = f"链接最多 {MAX_URL} 个字符"
+    else:
+        url = current("url")  # type: ignore[assignment]
+
+    # ---------- 提醒 ----------
+    reminder_minutes: list[int]
+    if "reminders" in provided:
+        parsed_reminders, reminder_error = normalize_reminders(payload.reminders)
+        if reminder_error is not None:
+            errors["reminders"] = reminder_error
+            reminder_minutes = serialize_reminders(current("reminders"))  # type: ignore[arg-type]
+        else:
+            reminder_minutes = parsed_reminders or []
+    else:
+        reminder_minutes = serialize_reminders(current("reminders"))  # type: ignore[arg-type]
 
     # ---------- 基本枚举 ----------
     if "status" in provided and payload.status is not None:
@@ -265,6 +296,8 @@ def normalize_event_input(
         "title": title,
         "description": description,
         "location": location,
+        "url": url,
+        "reminders": dump_reminders(reminder_minutes),
         "all_day": all_day,
         "timezone": timezone,
         "status": status,
@@ -286,7 +319,14 @@ def create_event(
     settings: Settings | None = None,
     source: str = EVENT_SOURCE_WEB,
     client_ref: str | None = None,
+    calendar_id: str | None = None,
+    user_id: str | None = None,
 ) -> Event:
+    """新建事件。
+
+    `calendar_id` 是归属日历(可见性与写权限都从它推导),`user_id` 记录创建人。
+    调用方必须先做过权限判断——本函数不做授权。
+    """
     values = normalize_event_input(payload, existing=None, settings=settings)
     now = utcnow()
     event = Event(
@@ -296,11 +336,24 @@ def create_event(
         updated_at=now,
         source=source,
         client_ref=(client_ref or None),
+        calendar_id=calendar_id,
+        created_by_user_id=user_id,
         **values,  # type: ignore[arg-type]
     )
     session.add(event)
     session.flush()
     return event
+
+
+def move_event_to_calendar(session: Session, event: Event, calendar_id: str) -> bool:
+    """把事件挪到另一个日历。返回是否真的发生变化。"""
+    if event.calendar_id == calendar_id:
+        return False
+    event.calendar_id = calendar_id
+    event.updated_at = utcnow()
+    event.sequence = (event.sequence or 0) + 1
+    session.flush()
+    return True
 
 
 def update_event(
@@ -356,10 +409,25 @@ def soft_delete_event(session: Session, event: Event) -> None:
     session.flush()
 
 
-def get_event(session: Session, event_id: str, *, include_deleted: bool = False) -> Event | None:
+def get_event(
+    session: Session,
+    event_id: str,
+    *,
+    include_deleted: bool = False,
+    calendar_ids: list[str] | None = None,
+) -> Event | None:
+    """按 id 取事件。
+
+    `calendar_ids` 给出「调用方有权看见的日历」时,不在其中的事件一律当作不存在
+    (返回 `None`),这样越权读别人的私人日历只会得到 404,不会暴露事件是否存在。
+    """
     stmt = select(Event).where(Event.id == event_id)
     if not include_deleted:
         stmt = stmt.where(Event.deleted_at.is_(None))
+    if calendar_ids is not None:
+        if not calendar_ids:
+            return None
+        stmt = stmt.where(Event.calendar_id.in_(calendar_ids))
     return session.execute(stmt).scalar_one_or_none()
 
 
@@ -387,6 +455,9 @@ def build_range(
     """把 API 传入的 start/end 解析成查询范围。
 
     纯日期按应用默认时区的当地午夜解释,`end` 为不含边界。
+    缺省起点是**应用默认时区的今天零点**:不能用 UTC 的日期去套当地零点,
+    否则在 UTC+10 这类时区里,当地刚过午夜时「今天」会被算成前一天,
+    昨天的全天事件就会重新出现在邮件附件里。
     """
     resolved = settings or get_settings()
     tz_name = _default_timezone(resolved)
@@ -394,7 +465,8 @@ def build_range(
     start_dt = _parse_range_bound(start, tz_name, is_end=False)
     end_dt = _parse_range_bound(end, tz_name, is_end=True)
     if start_dt is None:
-        start_dt = local_to_utc(datetime.combine(utcnow().date(), datetime.min.time()), tz_name)
+        local_today = utc_to_local(utcnow(), tz_name).date()
+        start_dt = local_to_utc(datetime.combine(local_today, datetime.min.time()), tz_name)
     if end_dt is None:
         end_dt = start_dt + timedelta(days=default_days)
     if end_dt <= start_dt:
@@ -442,11 +514,21 @@ def query_events(
     include_deleted: bool = False,
     limit: int | None = None,
     offset: int = 0,
+    calendar_ids: list[str] | None = None,
 ) -> tuple[list[Event], int]:
-    """按条件查询事件,返回 (结果, 命中总数)。"""
+    """按条件查询事件,返回 (结果, 命中总数)。
+
+    `calendar_ids` 是权限过滤:传 `None` 表示「不过滤」(导出、后台与运维脚本用),
+    传列表(含空列表)表示只查这些日历;空列表直接返回零结果,而不是退化成不过滤。
+    """
     conditions = []
     if not include_deleted:
         conditions.append(Event.deleted_at.is_(None))
+
+    if calendar_ids is not None:
+        if not calendar_ids:
+            return [], 0
+        conditions.append(Event.calendar_id.in_(calendar_ids))
 
     if date_range is not None:
         conditions.append(
@@ -664,8 +746,16 @@ def _overlaps(event: Event, date_range: DateRange) -> bool:
 # --------------------------------------------------------------------------
 # 序列化
 # --------------------------------------------------------------------------
-def serialize_event(event: Event) -> dict[str, object]:
+def serialize_event(
+    event: Event, *, access: CalendarAccess | None = None
+) -> dict[str, object]:
+    """序列化事件。
+
+    给出 `access`(当前账号的日历权限快照)时,额外带上日历名称、颜色与 `can_write`,
+    界面据此给事件着色并决定是否可拖动;不给时只输出事件自身的字段。
+    """
     tz_name = event.timezone or "UTC"
+    reminder_minutes = serialize_reminders(event.reminders)
     start_local = (
         utc_to_local(event.start_at_utc, tz_name).isoformat()
         if event.start_at_utc is not None
@@ -676,12 +766,15 @@ def serialize_event(event: Event) -> dict[str, object]:
         if event.end_at_utc is not None
         else None
     )
-    return {
+    payload: dict[str, object] = {
         "id": event.id,
         "uid": event.uid,
         "title": event.title,
         "description": event.description,
         "location": event.location,
+        "url": event.url,
+        "reminders": reminder_minutes,
+        "reminder_labels": reminder_labels(reminder_minutes),
         "all_day": bool(event.all_day),
         "timezone": tz_name,
         "status": event.status,
@@ -689,6 +782,8 @@ def serialize_event(event: Event) -> dict[str, object]:
         "client_ref": event.client_ref,
         "rrule": event.rrule,
         "rrule_label": describe_rrule(event.rrule),
+        "calendar_id": event.calendar_id,
+        "created_by_user_id": event.created_by_user_id,
         "start_at_utc": iso_utc(event.start_at_utc),
         "end_at_utc": iso_utc(event.end_at_utc),
         "start_local": start_local,
@@ -702,12 +797,25 @@ def serialize_event(event: Event) -> dict[str, object]:
         "updated_at": iso_utc(event.updated_at),
         "deleted_at": iso_utc(event.deleted_at),
     }
+    if access is not None:
+        calendar = access.get(event.calendar_id)
+        payload.update(
+            {
+                "calendar_name": calendar.name if calendar is not None else None,
+                "calendar_color": calendar.color if calendar is not None else None,
+                "calendar_kind": calendar.kind if calendar is not None else None,
+                "can_write": access.can_write(event.calendar_id),
+            }
+        )
+    return payload
 
 
-def serialize_occurrence(occurrence: Occurrence) -> dict[str, object]:
+def serialize_occurrence(
+    occurrence: Occurrence, *, access: CalendarAccess | None = None
+) -> dict[str, object]:
     """给日历界面用的形态:start/end 直接对齐 FullCalendar 约定。"""
     event = occurrence.event
-    payload = serialize_event(event)
+    payload = serialize_event(event, access=access)
     is_instance = occurrence.is_instance
     payload["id"] = occurrence.key
     payload["event_id"] = event.id
@@ -738,13 +846,15 @@ def serialize_occurrence(occurrence: Occurrence) -> dict[str, object]:
 def serialize_events_with_occurrences(
     events: list[Event],
     date_range: DateRange | None,
+    *,
+    access: CalendarAccess | None = None,
 ) -> list[dict[str, object]]:
     if date_range is None:
-        return [serialize_event(event) for event in events]
+        return [serialize_event(event, access=access) for event in events]
     payloads: list[dict[str, object]] = []
     for event in events:
         for occurrence in expand_occurrences(event, date_range):
-            payloads.append(serialize_occurrence(occurrence))
+            payloads.append(serialize_occurrence(occurrence, access=access))
     payloads.sort(key=lambda item: (str(item.get("start") or ""), str(item.get("title") or "")))
     return payloads
 

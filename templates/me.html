@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}我的设置 · {{ calendar_name }}{% endblock %}
+
+{% block content %}
+{% if current_user.user.must_change_password %}
+  <div class="alert error">你正在使用初始口令,请立即修改。</div>
+{% endif %}
+
+{% set profile = {
+  'display_name': current_user.user.display_name or '',
+  'email': current_user.user.email or '',
+  'color': current_user.user.color or '',
+  'timezone': current_user.user.timezone or ''
+} %}
+{% set timezone_groups = timezone_groups | default([]) %}
+{% set timezone_known = timezone_known | default([]) %}
+{% set current_timezone = current_timezone | default(profile.timezone) %}
+{% set default_timezone = default_timezone | default(current_user.user.timezone or system_timezone) %}
+
+{% include "partials/me.html" %}
+{% endblock %}

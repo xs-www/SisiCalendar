@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.deps import AdminDep, CsrfHeaderDep
+from app.deps import AdminDep, CsrfHeaderAdminDep
 from app.errors import error_payload
 from app.mailer import MailError, config_from_settings, send_test_mail, test_connection
 from app.mailqueue import (
@@ -68,7 +68,7 @@ def sync_status(admin: AdminDep, session: Session = Depends(get_db)) -> dict[str
 
 @router.post("/sync/calendar", summary="手动重新生成 ICS")
 def regenerate_calendar(
-    admin: CsrfHeaderDep,
+    admin: CsrfHeaderAdminDep,
     session: Session = Depends(get_db),
     force: bool = Query(default=True, description="即使内容未变化也生成新版本"),
 ) -> dict[str, object]:
@@ -92,7 +92,7 @@ def regenerate_calendar(
 @router.post("/sync/mail/send-latest", summary="确认后向当前启用人员发送最新版")
 def send_latest(
     payload: SendLatestRequest,
-    admin: CsrfHeaderDep,
+    admin: CsrfHeaderAdminDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
     if not payload.confirm:
@@ -100,7 +100,7 @@ def send_latest(
             422,
             error_payload(
                 "confirmation_required",
-                "向全部启用人员发送完整日历前必须二次确认",
+                "向全部启用收件人发送日程快照前必须二次确认",
                 {"confirm": "必须显式确认"},
             ),
         )
@@ -150,7 +150,7 @@ def list_deliveries(
 @router.post("/mail-deliveries/{delivery_id}/retry", summary="重试一次失败的发送任务")
 def retry_one(
     delivery_id: str,
-    admin: CsrfHeaderDep,
+    admin: CsrfHeaderAdminDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
     settings = effective_settings(session)
@@ -186,7 +186,7 @@ def retry_one(
 
 @router.post("/settings/mail/test", summary="测试邮件连接或发送测试邮件")
 def mail_test(
-    admin: CsrfHeaderDep,
+    admin: CsrfHeaderAdminDep,
     session: Session = Depends(get_db),
     to: str | None = Query(default=None, description="填写则发送测试邮件"),
 ) -> dict[str, object]:

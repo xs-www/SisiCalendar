@@ -10,8 +10,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app import urls
 from app.db import get_db
-from app.deps import AdminDep, CsrfHeaderDep
+from app.deps import AdminDep, CsrfHeaderAdminDep
 from app.errors import error_payload
 from app.schemas import SettingsUpdate
 from app.settings_store import (
@@ -35,7 +36,7 @@ def _serialize(session: Session) -> dict[str, object]:
         "default_event_duration_minutes": settings.default_event_duration_minutes,
         "mail_max_attempts": settings.mail_max_attempts,
         "mail_backoff_minutes": settings.mail_backoff_minutes,
-        "subscription_url": settings.subscription_url,
+        "public_base_url": urls.public_base_url(settings),
         "feed_cache_seconds": settings.feed_cache_seconds,
         "mail_configured": settings.mail_configured,
         # 常用时区清单:event 接口的 timezone 可以直接填这里的 index
@@ -62,7 +63,7 @@ def read_settings(admin: AdminDep, session: Session = Depends(get_db)) -> dict[s
 @router.patch("/settings", summary="修改应用设置")
 def update_settings(
     payload: SettingsUpdate,
-    admin: CsrfHeaderDep,
+    admin: CsrfHeaderAdminDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
     values = payload.model_dump(exclude_unset=True, exclude_none=True)

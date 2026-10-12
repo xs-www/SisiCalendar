@@ -12,8 +12,6 @@ from app.timeutil import utcnow
 from fastapi.testclient import TestClient
 from icalendar import Calendar
 
-FEED_PATHS = ["/calendar", "/calendar.ics"]
-
 
 def _create(client: TestClient, headers: dict[str, str], **overrides) -> dict:
     payload = {
@@ -28,17 +26,21 @@ def _create(client: TestClient, headers: dict[str, str], **overrides) -> dict:
     return response.json()
 
 
-def test_feed_is_public_and_not_a_redirect(client: TestClient) -> None:
-    response = client.get("/calendar")
+def test_feed_is_public_and_not_a_redirect(
+    client: TestClient, app_owner_feed_path: str
+) -> None:
+    response = client.get(app_owner_feed_path)
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/calendar")
 
 
 def test_feed_headers(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
-    response = admin_client.get("/calendar")
+    response = admin_client.get(app_owner_feed_path)
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/calendar; charset=utf-8"
@@ -52,68 +54,79 @@ def test_feed_headers(
     assert payload.get("METHOD") is None
 
 
-def test_alias_returns_identical_content(
-    admin_client: TestClient, api_headers: dict[str, str]
-) -> None:
-    _create(admin_client, api_headers)
-    primary = admin_client.get("/calendar")
-    alias = admin_client.get("/calendar.ics")
-    assert primary.content == alias.content
-    assert primary.headers["etag"] == alias.headers["etag"]
+def test_legacy_tokenless_paths_are_gone(client: TestClient) -> None:
+    """无令牌的旧地址永久取消:订阅端拿到的是纯文本 404,不是 HTML 页面。"""
+    for path in ("/calendar", "/calendar/", "/calendar.ics"):
+        response = client.get(path)
+        assert response.status_code == 404, path
+        assert response.headers["content-type"].startswith("text/plain"), path
+    # 前缀本身(订阅端最可能存错的两个地址)给出看得懂的说明
+    for path in ("/calendar", "/calendar/"):
+        assert "不再提供日历" in client.get(path).text, path
 
 
 def test_etag_matches_content_hash(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
-    response = admin_client.get("/calendar")
+    response = admin_client.get(app_owner_feed_path)
     expected = '"' + hashlib.sha256(response.content).hexdigest() + '"'
     assert response.headers["etag"] == expected
 
 
 def test_conditional_get_with_etag_returns_304(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
-    first = admin_client.get("/calendar")
+    first = admin_client.get(app_owner_feed_path)
     etag = first.headers["etag"]
 
-    response = admin_client.get("/calendar", headers={"If-None-Match": etag})
+    response = admin_client.get(app_owner_feed_path, headers={"If-None-Match": etag})
     assert response.status_code == 304
     assert response.content == b""
     assert response.headers["etag"] == etag
 
     # 弱校验符写法也应识别
-    weak = admin_client.get("/calendar", headers={"If-None-Match": f"W/{etag}"})
+    weak = admin_client.get(app_owner_feed_path, headers={"If-None-Match": f"W/{etag}"})
     assert weak.status_code == 200
 
 
 def test_conditional_get_with_last_modified_returns_304(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
-    first = admin_client.get("/calendar")
+    first = admin_client.get(app_owner_feed_path)
     modified = first.headers["last-modified"]
 
-    response = admin_client.get("/calendar", headers={"If-Modified-Since": modified})
+    response = admin_client.get(app_owner_feed_path, headers={"If-Modified-Since": modified})
     assert response.status_code == 304
 
 
 def test_stale_last_modified_returns_full_body(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
     old = format_datetime(datetime.now(UTC) - timedelta(days=30), usegmt=True)
-    response = admin_client.get("/calendar", headers={"If-Modified-Since": old})
+    response = admin_client.get(app_owner_feed_path, headers={"If-Modified-Since": old})
     assert response.status_code == 200
 
 
 def test_head_returns_headers_without_body(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
-    get_response = admin_client.get("/calendar")
-    head_response = admin_client.head("/calendar")
+    get_response = admin_client.get(app_owner_feed_path)
+    head_response = admin_client.head(app_owner_feed_path)
 
     assert head_response.status_code == 200
     assert head_response.content == b""
@@ -123,21 +136,26 @@ def test_head_returns_headers_without_body(
 
 
 def test_etag_changes_after_new_event(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
-    before = admin_client.get("/calendar").headers["etag"]
+    before = admin_client.get(app_owner_feed_path).headers["etag"]
     _create(admin_client, api_headers, title="第二个事件")
-    after = admin_client.get("/calendar").headers["etag"]
+    after = admin_client.get(app_owner_feed_path).headers["etag"]
     assert before != after
 
 
 def test_feed_serves_last_valid_file_when_export_fails(
-    admin_client: TestClient, api_headers: dict[str, str], monkeypatch
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
+    monkeypatch,
 ) -> None:
     """导出失败时不能返回半写入文件,而是继续提供最近的有效版本。"""
     _create(admin_client, api_headers)
-    good = admin_client.get("/calendar").content
+    good = admin_client.get(app_owner_feed_path).content
 
     import app.exporter as exporter
 
@@ -158,7 +176,7 @@ def test_feed_serves_last_valid_file_when_export_fails(
         assert created.json()["sync"]["error"]
 
         # 生成仍然失败:订阅端必须拿到上一次完整有效的文件
-        response = admin_client.get("/calendar")
+        response = admin_client.get(app_owner_feed_path)
         assert response.status_code == 200
         assert response.content == good
     finally:
@@ -178,13 +196,15 @@ def test_feed_serves_last_valid_file_when_export_fails(
     finally:
         session.close()
     assert outcome.ok is True
-    repaired = admin_client.get("/calendar").content
+    repaired = admin_client.get(app_owner_feed_path).content
     assert repaired != good
     assert "触发失败" in repaired.decode("utf-8")
 
 
 def test_dirty_state_is_repaired_by_feed_request(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient,
+    api_headers: dict[str, str],
+    app_owner_feed_path: str,
 ) -> None:
     _create(admin_client, api_headers)
     from app.db import get_session_factory
@@ -198,7 +218,7 @@ def test_dirty_state_is_repaired_by_feed_request(
     finally:
         session.close()
 
-    response = admin_client.get("/calendar")
+    response = admin_client.get(app_owner_feed_path)
     assert response.status_code == 200
     status = admin_client.get("/api/v1/sync/status").json()
     assert status["dirty"] is False

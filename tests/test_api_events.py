@@ -42,7 +42,8 @@ def _current_version(client: TestClient) -> int:
 
 
 def test_create_event_generates_ics_immediately(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient, api_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     baseline = _current_version(admin_client)
     body = _create(admin_client, api_headers)
@@ -50,7 +51,7 @@ def test_create_event_generates_ics_immediately(
     assert body["sync"]["changed"] is True
     assert body["sync"]["version"] == baseline + 1
 
-    feed = admin_client.get("/calendar")
+    feed = admin_client.get(owner_feed_path)
     assert feed.status_code == 200
     calendar = Calendar.from_ical(feed.content)
     titles = [str(component["SUMMARY"]) for component in calendar.walk("VEVENT")]
@@ -109,7 +110,8 @@ def test_optimistic_lock_conflict(
 
 
 def test_update_increments_sequence_and_version(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient, api_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     baseline = _current_version(admin_client)
     created = _create(admin_client, api_headers)
@@ -123,7 +125,7 @@ def test_update_increments_sequence_and_version(
     assert updated["sequence"] == 1
     assert updated["sync"]["version"] == baseline + 2
 
-    calendar = Calendar.from_ical(admin_client.get("/calendar").content)
+    calendar = Calendar.from_ical(admin_client.get(owner_feed_path).content)
     component = calendar.walk("VEVENT")[0]
     assert str(component["SUMMARY"]) == "改过的标题"
     assert int(component["SEQUENCE"]) == 1
@@ -143,7 +145,8 @@ def test_noop_update_does_not_create_new_version(
 
 
 def test_delete_is_soft_and_removes_from_ics(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient, api_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     created = _create(admin_client, api_headers)
     other = _create(admin_client, api_headers, title="保留的事件")
@@ -154,7 +157,7 @@ def test_delete_is_soft_and_removes_from_ics(
     assert response.status_code == 200
     assert response.json()["sync"]["ok"] is True
 
-    calendar = Calendar.from_ical(admin_client.get("/calendar").content)
+    calendar = Calendar.from_ical(admin_client.get(owner_feed_path).content)
     uids = [str(component["UID"]) for component in calendar.walk("VEVENT")]
     assert uids == [other["uid"]]
 
@@ -162,7 +165,8 @@ def test_delete_is_soft_and_removes_from_ics(
 
 
 def test_all_day_event_validation(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient, api_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     created = _create(
         admin_client,
@@ -178,7 +182,7 @@ def test_all_day_event_validation(
     assert created["end_date_exclusive"] == "2025-05-03"
     assert created["start_at_utc"] is None
 
-    calendar = Calendar.from_ical(admin_client.get("/calendar").content)
+    calendar = Calendar.from_ical(admin_client.get(owner_feed_path).content)
     component = calendar.walk("VEVENT")[0]
     assert component["DTSTART"].params.get("VALUE") == "DATE"
 

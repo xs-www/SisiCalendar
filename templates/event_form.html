@@ -6,29 +6,55 @@
 <section class="card form-card">
   <header class="card-head">
     <h1>{{ '编辑日程' if editing else '新建日程' }}</h1>
-    <a class="button ghost" href="/admin">返回日历</a>
+    <a class="button ghost" href="{{ bp() }}/admin">返回日历</a>
   </header>
 
   <div id="form-errors" class="alert error" hidden></div>
 
+  {% if editing and not event_writable %}
+    <div class="alert error">
+      <strong>你没有修改该事件的权限(家庭共享日历默认只有管理员能改)。</strong>
+      下面的内容仅供查看,保存与删除已停用;需要修改请联系家庭管理员放开权限。
+    </div>
+  {% elif not editing and not event_writable %}
+    <div class="alert error">你没有可写的日历,暂时无法新建日程;请联系家庭管理员分配权限。</div>
+  {% endif %}
+
   {% if editing and event.source == 'agent' %}
     <div class="alert ok">
       这条日程由远程 Agent 创建{% if event.client_ref %}(幂等键 <code>{{ event.client_ref }}</code>){% endif %}。
-      手动修改后会按正常流程重新生成 ICS 并通知同步人员。
+      手动修改后会按正常流程重新生成 ICS 并把最新快照通知对应收件人。
     </div>
   {% endif %}
 
   <form id="event-form"
         data-mode="{{ mode }}"
         data-event-id="{{ event.id }}"
-        data-api="/api/v1"
+        data-api="{{ bp() }}/api/v1"
         data-csrf="{{ csrf_token }}"
-        data-redirect="/admin">
+        data-redirect="{{ bp() }}/admin">
 
     <label class="field">
       <span>标题 <em>必填</em></span>
       <input type="text" name="title" maxlength="200" required value="{{ event.title or '' }}">
     </label>
+
+    {% set writable_calendars = calendar_options | selectattr('can_write') | list %}
+    {% if writable_calendars %}
+      <label class="field">
+        <span>日历 <em>日程会落到这个日历里</em></span>
+        <select name="calendar_id" id="calendar-id">
+          {% for item in writable_calendars %}
+            <option value="{{ item.id }}" {{ 'selected' if item.id == selected_calendar_id else '' }}>
+              {{ item.name }}{{ '(个人)' if item.kind == 'personal' else '(共享)' }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <p class="hint">只有你有写权限的日历才会出现在这里;共享日历的写权限由家庭管理员在「成员」页分配。</p>
+    {% else %}
+      <p class="hint">你没有可写的日历,无法在这里新建或迁移日程。</p>
+    {% endif %}
 
     <div class="field-row">
       <label class="checkbox">
@@ -90,9 +116,38 @@
       </label>
     </div>
 
+    <fieldset class="field reminder-field">
+      <legend>提醒 <em>可多选,不选即不提醒</em></legend>
+      <div class="checkbox-group" data-reminders="1">
+        {% for item in reminder_options %}
+          <label class="checkbox">
+            <input type="checkbox" name="reminder_preset" value="{{ item.minutes }}"
+                   {{ 'checked' if item.selected else '' }}>
+            <span>{{ item.label }}</span>
+          </label>
+        {% endfor %}
+      </div>
+      <label class="field">
+        <span>自定义提醒 <em>可选,分钟数用逗号分隔</em></span>
+        <input type="text" name="reminder_custom" id="reminder-custom"
+               value="{{ custom_reminders }}" placeholder="如 45,2880">
+      </label>
+      <p class="hint">
+        提醒相对<strong>事件开始时间</strong>计算:<code>0</code> = 开始时,正数 = 提前,负数 = 延后。
+        全天事件以当天 <code>00:00</code> 为基准,所以 <code>1440</code> = 提前 1 天。
+        这些提醒会写进 <code>calendar.ics</code> 的 <code>VALARM</code>。
+      </p>
+    </fieldset>
+
     <label class="field">
       <span>地点</span>
       <input type="text" name="location" maxlength="500" value="{{ event.location or '' }}">
+    </label>
+
+    <label class="field">
+      <span>链接 <em>可选</em></span>
+      <input type="url" name="url" maxlength="1000" value="{{ event.url or '' }}"
+             placeholder="https://">
     </label>
 
     <label class="field">
@@ -103,16 +158,22 @@
     <input type="hidden" name="expected_updated_at" value="{{ event.updated_at or '' }}">
 
     <div class="form-actions">
-      <button type="submit" class="button primary">{{ '保存并同步' if editing else '创建并同步' }}</button>
-      <a class="button ghost" href="/admin">取消</a>
-      {% if editing %}
+      <button type="submit" class="button primary" {{ '' if event_writable else 'disabled' }}>
+        {{ '保存并同步' if editing else '创建并同步' }}
+      </button>
+      <a class="button ghost" href="{{ bp() }}/admin">取消</a>
+      {% if editing and event_writable %}
         <button type="button" id="delete-event" class="button danger">删除日程</button>
       {% endif %}
     </div>
-    <p class="hint">
-      点击“{{ '保存并同步' if editing else '创建并同步' }}”后会立即重新生成 <code>calendar.ics</code>,
-      并向全部启用的同步人员发送完整日历附件。
-    </p>
+    {% if event_writable %}
+      <p class="hint">
+        点击“{{ '保存并同步' if editing else '创建并同步' }}”后会立即重新生成 <code>calendar.ics</code>,
+        并把<strong>你可见日历里尚未结束的日程</strong>快照发给对应的收件人(每人只收到自己范围的内容)。
+      </p>
+    {% else %}
+      <p class="hint">查看模式:保存与删除都已停用,直接返回日历即可。</p>
+    {% endif %}
   </form>
 
   <datalist id="tz-list">
@@ -123,5 +184,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/event_form.js"></script>
+<script src="{{ asset('js/event_form.js') }}"></script>
 {% endblock %}

@@ -20,7 +20,14 @@ from pathlib import Path
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app import urls
+from app.accounts import recipient_scope_user_id
 from app.config import Settings, get_settings
+from app.exporter import (
+    feed_target_key,
+    mail_snapshot_path_for,
+    target_snapshot_path_for,
+)
 from app.mailer import MailError, SmtpConfig, build_message, config_from_settings, send_message
 from app.models import (
     CHANGE_CREATED,
@@ -74,6 +81,27 @@ def enabled_recipients(session: Session) -> list[SyncRecipient]:
     return list(session.execute(stmt).scalars())
 
 
+def attachment_source(
+    export: CalendarExport, settings: Settings, *, target_key: str
+) -> tuple[Path, str]:
+    """发信任务要用的不可变附件:优先该订阅目标「仅尚未结束的日程」的邮件快照。
+
+    回退顺序(都不存在时才继续往下):该目标的邮件快照 → 该目标的完整快照 →
+    版本并集快照。这样升级前创建的旧版本、被清理过快照的版本都仍然发得出去,
+    宁可多发历史日程,也不能让任务因为找不到文件而失败。
+    返回的哈希始终是**实际被附上的那个文件**的 SHA-256,发送前会再校验一次。
+    """
+    for candidate in (
+        mail_snapshot_path_for(settings, export.version, target_key=target_key),
+        target_snapshot_path_for(settings, export.version, target_key),
+    ):
+        try:
+            return candidate, hashlib.sha256(candidate.read_bytes()).hexdigest()
+        except OSError:
+            continue
+    return Path(export.snapshot_path), export.content_hash
+
+
 def ensure_delivery_tasks(
     session: Session,
     *,
@@ -88,6 +116,9 @@ def ensure_delivery_tasks(
 
     幂等:同一 (export_version, recipient_id) 已存在任务时跳过,因此重复保存
     不会向同一个人重复发送同一版本。
+
+    附件按**收件人范围**取:账号收件人拿到「他可见日历里尚未结束的日程」,
+    外部邮箱拿到「家庭共享日历里尚未结束的日程」。
     """
     resolved = settings or get_settings()
     if not resolved.mail_configured:
@@ -113,9 +144,14 @@ def ensure_delivery_tasks(
     }
 
     created = 0
+    sources: dict[str, tuple[Path, str]] = {}
     for recipient in recipients:
         if recipient.id in existing:
             continue
+        key = feed_target_key(user_id=recipient_scope_user_id(recipient))
+        if key not in sources:
+            sources[key] = attachment_source(export, resolved, target_key=key)
+        attachment_path, attachment_hash = sources[key]
         session.add(
             MailDelivery(
                 export_version=export_version,
@@ -125,8 +161,8 @@ def ensure_delivery_tasks(
                 event_title=(event_title or None),
                 event_time_text=(event_time_text or None),
                 change_type=change_type,
-                attachment_hash=export.content_hash,
-                snapshot_path=export.snapshot_path,
+                attachment_hash=attachment_hash,
+                snapshot_path=str(attachment_path),
                 status="pending",
                 attempt_count=0,
                 next_attempt_at=utcnow(),
@@ -159,7 +195,8 @@ def _body_for(
     delivery: MailDelivery,
     *,
     calendar_name: str,
-    subscription_url: str,
+    scope_label: str,
+    subscription_hint: str,
     generated_at: datetime | None,
     event_title: str | None,
     event_time_text: str | None,
@@ -185,10 +222,20 @@ def _body_for(
     lines.extend(
         [
             "",
-            "附件 calendar.ics 是本次导出的**完整日历快照**,包含全部当前有效日程,",
-            "不是只包含本次改动的局部文件。",
+            f"附件 calendar.ics 是**{scope_label}**里尚未结束的日程快照。"
+            "完整历史(含过去事件)始终可以从长期订阅地址获得。",
             "",
-            f"长期订阅地址(需要 Tailscale):{subscription_url}",
+        ]
+    )
+    if subscription_hint:
+        lines.append(f"你的固定订阅地址(长期有效,需要 Tailscale):{subscription_hint}")
+    else:
+        lines.append(
+            "长期订阅地址:每位家庭成员都有自己的固定地址(每人一条、只在本人界面显示),"
+            "主人可以在日历管理界面「我的订阅地址」里查看。"
+        )
+    lines.extend(
+        [
             "",
             "提示:邮件附件只是一次性快照,不会随日程变化自动更新;",
             "需要持续自动更新请使用上面的订阅地址。",
@@ -200,6 +247,39 @@ def _body_for(
 def _next_attempt(attempt_count: int, backoff_minutes: list[int], now: datetime) -> datetime:
     index = min(max(attempt_count - 1, 0), len(backoff_minutes) - 1)
     return now + timedelta(minutes=backoff_minutes[index])
+
+
+def _scope_hints(
+    recipient: SyncRecipient | None, *, settings: Settings, session: Session
+) -> tuple[str, str]:
+    """邮件正文里的「附件范围」与「订阅地址」。
+
+    附件范围由 `recipient_scope_user_id()` 决定:账号收件人是**他自己可见的日历**,
+    历史外部邮箱沿用绑定时那个账号的范围,其余外部邮箱只有家庭共享日历。
+
+    订阅地址只发给**账号收件人**(`user_id` 非空),而且一定是他自己那条**固定地址**:
+    由服务端密钥与账号 ID 派生,所以正文里可以随时重算出来,不必依赖「只显示一次」的明文。
+    外部邮箱是替别人收信,正文里不给任何地址。
+    """
+    from app.accounts import get_user, recipient_scope_user_id
+    from app.feed_tokens import account_feed_token
+
+    scope_user_id = recipient_scope_user_id(recipient) if recipient is not None else None
+    if scope_user_id:
+        label = "你可见的日历(个人 + 家庭共享)"
+        if recipient is not None and recipient.user_id:
+            hint = urls.subscription_url(
+                settings, account_feed_token(settings, recipient.user_id)
+            )
+            return label, hint
+        # 历史外部邮箱收到的是**被绑定账号**的范围,正文不能说成「你可见的日历」
+        scope_user = get_user(session, scope_user_id)
+        label = (
+            f"{scope_user.label if scope_user is not None else '某成员'}"
+            "可见的日历(个人 + 家庭共享)"
+        )
+        return label, ""
+    return "家庭共享日历", ""
 
 
 def _load_attachment(delivery: MailDelivery) -> bytes:
@@ -236,10 +316,15 @@ def attempt_delivery(
         attachment = _load_attachment(delivery)
         export = session.get(CalendarExport, delivery.export_version)
         state = session.get(CalendarExportState, CalendarExportState.SINGLETON_ID)
+        recipient = session.get(SyncRecipient, delivery.recipient_id)
+        scope_label, subscription_hint = _scope_hints(
+            recipient, settings=settings, session=session
+        )
         body = _body_for(
             delivery,
             calendar_name=settings.calendar_name,
-            subscription_url=settings.subscription_url,
+            scope_label=scope_label,
+            subscription_hint=subscription_hint,
             generated_at=export.created_at if export else (state.generated_at if state else None),
             event_title=event_title,
             event_time_text=event_time_text,

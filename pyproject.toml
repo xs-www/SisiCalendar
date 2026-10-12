@@ -1,7 +1,7 @@
 [project]
 name = "sisi-calendar"
 version = "0.1.0"
-description = "本地日程与订阅日历服务:SQLite 为事实来源,派生 ICS 供 iPhone 订阅,并邮件分发完整日历快照"
+description = "家庭共享日历服务:SQLite 为事实来源,按账号派生只读 ICS 供各人订阅,并按收件人范围邮件分发尚未结束的日程快照"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

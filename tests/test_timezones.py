@@ -292,7 +292,7 @@ def test_mail_queue_shows_operation_and_sent_time() -> None:
             "content_hash": "0" * 64,
             "size_bytes": 128,
             "file_exists": True,
-            "subscription_url": "https://example.test/calendar",
+            "public_base_url": "https://example.test/calendar",
             "mail_configured": True,
             "recipients_enabled": 1,
             "recipients_total": 1,

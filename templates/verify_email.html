@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>邮箱验证 · {{ calendar_name }}</title>
+  <link rel="stylesheet" href="{{ asset('css/app.css') }}">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <h1>{{ calendar_name }}</h1>
+    <p class="muted">验证你的邮箱</p>
+
+    {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+    <p class="hint">
+      账号 <strong>{{ current_user.username }}</strong> 的邮箱
+      <code>{{ email }}</code> 还没有验证。<br>
+      我们已把 {{ code_length }} 位验证码发到该邮箱({{ ttl_minutes }} 分钟内有效,
+      最多可试 {{ max_attempts }} 次)。<strong>验证通过后账号才能使用</strong>,
+      系统随即会把属于你的固定订阅地址发到这个邮箱。
+    </p>
+
+    <form method="post" action="{{ bp() }}/verify-email">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>验证码
+        <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code"
+               pattern="[0-9]*" maxlength="{{ code_length }}" required autofocus>
+      </label>
+      <button type="submit" class="primary wide">验证并继续</button>
+    </form>
+
+    <form method="post" action="{{ bp() }}/verify-email/resend">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="ghost wide" {% if resend_wait > 0 %}disabled{% endif %}>
+        {% if resend_wait > 0 %}重新发送({{ resend_wait }} 秒后){% else %}重新发送验证码{% endif %}
+      </button>
+    </form>
+
+    <form method="post" action="{{ bp() }}/verify-email/email">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>邮箱写错了?
+        <input type="email" name="email" value="{{ email }}" maxlength="320"
+               autocomplete="email" required>
+      </label>
+      <button type="submit" class="ghost wide">改地址并重新发送</button>
+    </form>
+
+    <p class="hint">
+      收不到邮件?确认地址没写错、检查垃圾邮件;邮件由家庭服务器的 SMTP 发出,
+      如果长期收不到请联系家庭管理员确认发信配置。
+    </p>
+    <form method="post" action="{{ bp() }}/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="ghost wide">退出登录</button>
+    </form>
+  </div>
+</body>
+</html>

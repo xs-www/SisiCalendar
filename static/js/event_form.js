@@ -7,11 +7,13 @@
     return;
   }
 
-  const api = form.dataset.api || "/api/v1";
+  // 公开前缀:从 `/calendar/...` 进来的页面要回到 `/calendar/...`,从裸路径进来则不加前缀
+  const basePath = (document.body && document.body.dataset.basePath) || "";
+  const api = form.dataset.api || basePath + "/api/v1";
   const csrf = form.dataset.csrf || "";
   const mode = form.dataset.mode || "create";
   const eventId = form.dataset.eventId || "";
-  const redirect = form.dataset.redirect || "/admin";
+  const redirect = form.dataset.redirect || basePath + "/admin";
 
   const allDayBox = document.getElementById("all-day");
   const timedFields = document.getElementById("timed-fields");
@@ -50,11 +52,37 @@
     }
   }
 
+  /* 收集提醒:预设勾选 + 自定义分钟数(逗号分隔),去重后从大到小。 */
+  function collectReminders() {
+    const values = [];
+    form.querySelectorAll("input[name=reminder_preset]:checked").forEach(function (box) {
+      const value = parseInt(box.value, 10);
+      if (!Number.isNaN(value)) {
+        values.push(value);
+      }
+    });
+    const custom = document.getElementById("reminder-custom");
+    if (custom) {
+      (custom.value || "").split(/[,;，；\s]+/).forEach(function (chunk) {
+        if (!chunk) return;
+        const value = parseInt(chunk, 10);
+        if (!Number.isNaN(value)) {
+          values.push(value);
+        }
+      });
+    }
+    return Array.from(new Set(values)).sort(function (a, b) {
+      return b - a;
+    });
+  }
+
   function buildPayload(data) {
     const payload = {
       title: (data.get("title") || "").toString().trim(),
       description: (data.get("description") || "").toString().trim() || null,
       location: (data.get("location") || "").toString().trim() || null,
+      url: (data.get("url") || "").toString().trim() || null,
+      reminders: collectReminders(),
       all_day: allDayBox.checked,
       timezone: (data.get("timezone") || "").toString().trim(),
       status: data.get("status") || "confirmed",
@@ -74,6 +102,12 @@
     if (expected) {
       payload.expected_updated_at = expected;
     }
+
+    // 日历归属:新建时决定落库日历,编辑时用于迁移;只读事件没有这个下拉框
+    const calendarId = (data.get("calendar_id") || "").toString().trim();
+    if (calendarId) {
+      payload.calendar_id = calendarId;
+    }
     return payload;
   }
 
@@ -91,6 +125,10 @@
   form.addEventListener("submit", async function (event) {
     event.preventDefault();
     const submitButton = form.querySelector("button[type=submit]");
+    if (submitButton && submitButton.disabled) {
+      // 只读事件:按钮已停用,不该走到这里
+      return;
+    }
     submitButton.disabled = true;
     errorBox.hidden = true;
 
@@ -127,8 +165,14 @@
 
   const deleteButton = document.getElementById("delete-event");
   if (deleteButton) {
+    const calendarSelect = document.getElementById("calendar-id");
+    const calendarName = calendarSelect && calendarSelect.selectedOptions.length
+      ? calendarSelect.selectedOptions[0].textContent.trim()
+      : "所属日历";
     deleteButton.addEventListener("click", async function () {
-      if (!window.confirm("确定删除这条日程吗?删除后会立即从订阅日历中移除,并向同步人员发送新版日历。")) {
+      if (!window.confirm(
+        "确定删除这条日程吗?删除后会立即从「" + calendarName + "」的订阅日历中移除,并把最新快照发给对应的收件人。"
+      )) {
         return;
       }
       deleteButton.disabled = true;

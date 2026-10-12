@@ -32,14 +32,26 @@
 
 <section class="card">
   <header class="card-head">
-    <h2>同步人员</h2>
-    <span class="chip">会收到完整日历</span>
+    <h2>邮件收件人</h2>
+    <span class="chip">按范围分别发送</span>
   </header>
   <p class="hint">
-    每位启用的同步人员都会在每次“保存并同步”后收到一封邮件,附件是**完整的最新版**日历,
-    其中可能包含你的全部私人日程。请逐位确认后再启用。
+    账号邮箱只收到<strong>自己可见且尚未结束</strong>的日程;外部邮箱只收<strong>家庭共享日历</strong>范围。
+    每封邮件只带对应范围的快照,不会把别人的私人日程发给外部邮箱。
   </p>
   {% include "partials/recipients.html" %}
+</section>
+
+<section class="card">
+  <header class="card-head">
+    <h2>家庭订阅地址</h2>
+    <span class="chip">给没有账号的外部订阅者</span>
+  </header>
+  <p class="hint">
+    成员各自在「我的设置」里生成自己的订阅地址;这里的地址只包含家庭共享日历,
+    适合发给没有账号的家人(例如长辈的手机)。
+  </p>
+  {% include "partials/family_feeds.html" %}
 </section>
 
 <section class="card">
@@ -48,6 +60,7 @@
     <span class="chip">{% if tokens %}已配置 {{ tokens|length }} 枚{% else %}仅 .env 兜底{% endif %}</span>
   </header>
   <p class="hint">
+    每枚令牌绑定一个账号与可写日历,Agent 新建的日程会落到该日历,权限也按该账号判定。
     供 iPhone 快捷指令、脚本或自动化 Agent 调用 <code>/api/agent</code> 使用。
     <strong>明文只在生成时显示一次</strong>,数据库只保存 <code>sha256</code> 哈希,
     因此丢失后只能撤销重建。环境变量 <code>AGENT_API_TOKEN</code> 中的令牌仍作为兜底一并生效。

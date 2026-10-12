@@ -2,6 +2,12 @@
 
 管理入口虽然只绑定回环地址,仍按文档第 11 节作为第二层保护:Argon2id 口令哈希、
 签名会话 Cookie、双提交 CSRF 令牌,以及对敏感动作的速率限制。
+
+家庭版(2026-10)起,登录主体是 `users` 表里的账号:
+
+- 会话里带 `user_id`,每次请求都重新读一次账号,以保证「停用账号立即失效」;
+- 环境变量里的 `ADMIN_PASSWORD`/`ADMIN_PASSWORD_HASH` 只在**首次启动**用来创建首位
+  管理员,不再是长期登录凭据(`app/bootstrap.py::ensure_family_setup`)。
 """
 
 from __future__ import annotations
@@ -29,7 +35,9 @@ SESSION_COOKIE_NAME = "sisi_session"
 LOGIN_CSRF_COOKIE_NAME = "sisi_login_csrf"
 CSRF_HEADER_NAME = "X-CSRF-Token"
 CSRF_FORM_FIELD = "csrf_token"
-SESSION_SALT = "sisi-calendar-session-v1"
+#: 家庭版换了会话载荷(user_id),升到 v2 让旧 Cookie 一律失效,避免出现「用户名在、
+#: 用户 id 不在」的半升级会话。
+SESSION_SALT = "sisi-calendar-session-v2"
 LOGIN_CSRF_SALT = "sisi-calendar-login-csrf-v1"
 
 _hasher = PasswordHasher()
@@ -102,6 +110,11 @@ def load_admin_hash(settings: Settings | None = None) -> str | None:
 
 
 def authenticate(username: str, password: str, settings: Settings | None = None) -> bool:
+    """校验**环境变量里的管理员口令**(仅用于兼容与排错)。
+
+    家庭版的登录走 `app/accounts.py::authenticate_user`(users 表);这个函数只在
+    「数据库里的账号全部丢失、需要确认 env 兜底口令是否正确」时使用。
+    """
     resolved = settings or get_settings()
     if not hmac.compare_digest(username.strip(), resolved.admin_username):
         # 仍然执行一次哈希校验,避免通过响应时间区分用户名是否存在
@@ -122,21 +135,25 @@ def _serializer(settings: Settings) -> URLSafeTimedSerializer:
 
 @dataclass(frozen=True)
 class SessionData:
+    user_id: str
     username: str
     csrf_token: str
     issued_at: int
 
 
-def create_session(settings: Settings | None = None) -> tuple[str, SessionData]:
+def create_session(
+    *, user_id: str, username: str, settings: Settings | None = None
+) -> tuple[str, SessionData]:
     resolved = settings or get_settings()
     csrf_token = secrets.token_urlsafe(32)
     data = SessionData(
-        username=resolved.admin_username,
+        user_id=user_id,
+        username=username,
         csrf_token=csrf_token,
         issued_at=int(time.time()),
     )
     token = _serializer(resolved).dumps(
-        {"sub": data.username, "csrf": data.csrf_token, "iat": data.issued_at}
+        {"uid": data.user_id, "sub": data.username, "csrf": data.csrf_token, "iat": data.issued_at}
     )
     return token, data
 
@@ -155,11 +172,13 @@ def read_session(token: str | None, settings: Settings | None = None) -> Session
         return None
     if not isinstance(payload, dict):
         return None
+    user_id = payload.get("uid")
     username = payload.get("sub")
     csrf = payload.get("csrf")
-    if not isinstance(username, str) or not isinstance(csrf, str):
+    if not isinstance(user_id, str) or not isinstance(username, str) or not isinstance(csrf, str):
         return None
     return SessionData(
+        user_id=user_id,
         username=username,
         csrf_token=csrf,
         issued_at=int(payload.get("iat") or 0),
@@ -206,7 +225,7 @@ def verify_login_csrf(
 
 
 # --------------------------------------------------------------------------
-# 限流:进程内滑动窗口,足够单用户单进程场景
+# 限流:进程内滑动窗口,足够家庭规模(3-5 人)的单进程部署
 # --------------------------------------------------------------------------
 class RateLimiter:
     def __init__(self) -> None:

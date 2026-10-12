@@ -3,9 +3,11 @@
 用途:让本机之外的自动化 Agent(脚本、LLM Agent、iOS 快捷指令等)通过 HTTP 新建日程。
 设计原则:
 
-- **默认关闭**:未配置 `AGENT_API_TOKEN` 时整个 `/api/agent` 返回 404,等同不存在。
+- **默认关闭**:没有任何令牌时整个 `/api/agent` 返回 404,等同不存在。
 - **只认 Bearer 令牌**:不接受 Cookie 会话,因此不存在 CSRF 面;
   浏览器即使已登录管理界面,没有令牌也无法调用。
+- **令牌带作用域**:每枚令牌绑定一个账号(`user_id`)与可选的默认日历(`calendar_id`),
+  新建的日程按该账号的权限落库,不会写进别人的私人日历。
 - **请求体宽容**:同时接受 `application/json` 与 `application/x-www-form-urlencoded`。
   表单形式是为 iOS 快捷指令准备的——「获取 URL 内容」选 Form 就不用手写 JSON 转义。
 - **幂等**:可选的 `client_ref` 让重试安全——同一个值重复提交返回同一个事件,
@@ -23,6 +25,7 @@ from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.accounts import calendar_access, get_user
 from app.db import get_db
 from app.deps import AgentDep
 from app.errors import error_payload, field_errors_from
@@ -36,7 +39,7 @@ from app.models import CHANGE_CREATED, EVENT_SOURCE_AGENT, Event
 from app.schemas import EventWrite
 from app.security import AuditLog, rate_limiter
 from app.settings_store import effective_settings
-from app.sync_service import mark_export_dirty, publish
+from app.sync_service import input_time_text, mark_export_dirty, publish
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +99,26 @@ async def read_event_payload(request: Request) -> EventWrite:
         ) from exc
 
 
+def _token_calendar_id(
+    principal: AgentDep, payload: EventWrite, access, session: Session
+) -> str | None:
+    """令牌固定的日历优先;否则用请求体里的;都没有就用该账号的默认日历。"""
+    for candidate in (principal.calendar_id, payload.calendar_id):
+        if not candidate:
+            continue
+        if not access.can_view(candidate):
+            raise HTTPException(
+                404, error_payload("not_found", "日历不存在或令牌无权访问")
+            )
+        if not access.can_write(candidate):
+            raise HTTPException(
+                403,
+                error_payload("forbidden", "令牌绑定的账号没有修改该日历的权限"),
+            )
+        return candidate
+    return access.default_write_calendar_id()
+
+
 @router.post(
     "/events",
     summary="远程 Agent 新建日程",
@@ -133,6 +156,16 @@ async def agent_create_event(
             headers={"Retry-After": str(retry_after)},
         )
 
+    user = get_user(session, principal.user_id)
+    if user is None or not user.enabled:
+        AuditLog.record("agent_create", "no_owner", actor=principal.label)
+        raise HTTPException(
+            status_code=401,
+            detail=error_payload(
+                "unauthorized", "令牌绑定的账号不存在或已停用,请重新创建令牌"
+            ),
+        )
+
     payload = await read_event_payload(request)
 
     client_ref = (payload.client_ref or "").strip() or None
@@ -146,18 +179,40 @@ async def agent_create_event(
             ),
         )
 
-    # 幂等重放:同一 client_ref 已存在时直接返回既有事件,不新建、不重新导出、不发信
+    access = calendar_access(session, user)
+
+    # 幂等重放:同一 client_ref 已存在时直接返回既有事件,不新建、不重新导出、不发信。
+    # 但只有落在该令牌可见范围内的才回放——否则会跨账号泄露别人的事件。
     if client_ref:
         existing = session.execute(
             select(Event).where(Event.client_ref == client_ref)
         ).scalar_one_or_none()
         if existing is not None:
+            if not access.can_view(existing.calendar_id):
+                AuditLog.record("agent_create", "client_ref_conflict", actor=principal.label)
+                raise HTTPException(
+                    status_code=409,
+                    detail=error_payload(
+                        "conflict",
+                        "该 client_ref 已被其他账号使用,请换一个幂等键",
+                        {"client_ref": "该幂等键不可用"},
+                    ),
+                )
             AuditLog.record(
                 "agent_create", "duplicate", actor=principal.label, detail=existing.id
             )
             return JSONResponse(
                 _serialize_result(existing, duplicate=True, sync=None), status_code=200
             )
+
+    calendar_id = _token_calendar_id(principal, payload, access, session)
+    if not calendar_id:
+        raise HTTPException(
+            status_code=409,
+            detail=error_payload(
+                "no_writable_calendar", "令牌绑定的账号没有任何可写的日历"
+            ),
+        )
 
     try:
         event = create_event(
@@ -166,6 +221,8 @@ async def agent_create_event(
             settings=settings,
             source=EVENT_SOURCE_AGENT,
             client_ref=client_ref,
+            calendar_id=calendar_id,
+            user_id=user.id,
         )
     except EventValidationError as exc:
         session.rollback()
@@ -179,15 +236,22 @@ async def agent_create_event(
     session.commit()
 
     outcome = publish(
-        session, settings=settings, change_type=CHANGE_CREATED, event=event
+        session,
+        settings=settings,
+        change_type=CHANGE_CREATED,
+        event=event,
+        # 提交时间带偏移量时,邮件正文按「提交者当时的钟点」表述
+        time_text=input_time_text(event, payload.start_at, payload.end_at),
     )
     AuditLog.record(
         "agent_create",
         "ok" if outcome.ok else "export_failed",
         actor=principal.label,
-        detail=f"{event.id} version={outcome.version}",
+        detail=f"{event.id} version={outcome.version} calendar={calendar_id}",
     )
-    logger.info("Agent 新建日程 id=%s sync_ok=%s", event.id, outcome.ok)
+    logger.info(
+        "Agent 新建日程 id=%s calendar=%s sync_ok=%s", event.id, calendar_id, outcome.ok
+    )
 
     return JSONResponse(
         _serialize_result(event, duplicate=False, sync=outcome.as_dict()),
@@ -201,8 +265,12 @@ def agent_read_event(
     principal: AgentDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
-    """只读回查,便于 Agent 在超时后确认结果。仅返回 Agent 创建的事件。"""
-    event = get_event(session, event_id)
+    """只读回查,便于 Agent 在超时后确认结果。仅返回该令牌可见范围内的事件。"""
+    user = get_user(session, principal.user_id)
+    if user is None or not user.enabled:
+        raise HTTPException(401, error_payload("unauthorized", "令牌绑定的账号不可用"))
+    access = calendar_access(session, user)
+    event = get_event(session, event_id, calendar_ids=access.viewable_ids())
     if event is None or event.source != EVENT_SOURCE_AGENT:
         raise HTTPException(404, error_payload("not_found", "事件不存在"))
     return _serialize_result(event, duplicate=False, sync=None)

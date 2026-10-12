@@ -1,4 +1,8 @@
-"""事件 REST API。"""
+"""事件 REST API。
+
+权限模型:可见性由日历决定,读不到的事件返回 404(不暴露存在性),
+写不动的事件返回 403(明确告诉调用方是权限问题)。日历清单见 `GET /api/v1/calendars`。
+"""
 
 from __future__ import annotations
 
@@ -7,8 +11,9 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
+from app.accounts import calendar_access
 from app.db import get_db
-from app.deps import AdminDep, CsrfHeaderDep
+from app.deps import CsrfHeaderDep, UserDep
 from app.errors import error_payload
 from app.events import (
     EventConflictError,
@@ -17,6 +22,7 @@ from app.events import (
     create_event,
     expand_occurrences,
     get_event,
+    move_event_to_calendar,
     query_events,
     serialize_event,
     serialize_occurrence,
@@ -26,7 +32,7 @@ from app.events import (
 from app.models import CHANGE_CREATED, CHANGE_DELETED, CHANGE_UPDATED
 from app.schemas import EventWrite
 from app.settings_store import effective_settings
-from app.sync_service import SyncOutcome, mark_export_dirty, publish
+from app.sync_service import SyncOutcome, input_time_text, mark_export_dirty, publish
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +48,73 @@ def _validation_error(exc: EventValidationError) -> HTTPException:
     )
 
 
+def _resolve_write_calendar(
+    payload_calendar_id: str | None,
+    access,
+    *,
+    existing_event_calendar_id: str | None = None,
+) -> str:
+    """决定这次写入落到哪个日历。
+
+    - 显式给了 `calendar_id` → 必须可写,否则 403;
+    - 修改既有事件且没给日历 → 沿用原日历(必须可写,否则调用方本来也读不到);
+    - 新建且没给日历 → 用个人日历,其次第一个可写的共享日历。
+    """
+    if payload_calendar_id:
+        if not access.can_view(payload_calendar_id):
+            raise HTTPException(
+                404, error_payload("not_found", "日历不存在或你没有访问权限")
+            )
+        if not access.can_write(payload_calendar_id):
+            raise HTTPException(
+                403,
+                error_payload(
+                    "forbidden",
+                    "你没有修改该日历的权限(家庭共享日历默认只有管理员能改)",
+                ),
+            )
+        return payload_calendar_id
+
+    if existing_event_calendar_id:
+        if not access.can_write(existing_event_calendar_id):
+            raise HTTPException(
+                403, error_payload("forbidden", "你没有修改该事件的权限")
+            )
+        return existing_event_calendar_id
+
+    default_id = access.default_write_calendar_id()
+    if not default_id:
+        raise HTTPException(
+            409,
+            error_payload("no_writable_calendar", "你没有任何可写的日历,请联系家庭管理员"),
+        )
+    return default_id
+
+
+@router.get("/calendars", summary="查询我有权访问的日历")
+def list_calendars(current: UserDep, session: Session = Depends(get_db)) -> dict[str, object]:
+    access = calendar_access(session, current.user)
+    return {
+        "items": [
+            {
+                "id": calendar.id,
+                "name": calendar.name,
+                "kind": calendar.kind,
+                "color": calendar.color,
+                "role": access.role_for(calendar.id),
+                "can_write": access.can_write(calendar.id),
+                "owner_user_id": calendar.owner_user_id,
+            }
+            for calendar in access.calendars
+        ],
+        "default_calendar_id": access.default_write_calendar_id(),
+    }
+
+
 @router.get("/events", summary="按日期范围和条件查询事件")
 def list_events(
     request: Request,
-    admin: AdminDep,
+    current: UserDep,
     session: Session = Depends(get_db),
     start: str | None = Query(default=None, description="范围起点,ISO 日期或时间"),
     end: str | None = Query(default=None, description="范围终点(不含),ISO 日期或时间"),
@@ -54,11 +123,21 @@ def list_events(
     source: str | None = Query(default=None, description="来源:web 或 agent"),
     all_day: bool | None = Query(default=None),
     recurring: bool | None = Query(default=None),
+    calendar_id: list[str] | None = Query(
+        default=None, description="只看这些日历;可重复传,缺省为全部可见日历"
+    ),
     expand: bool = Query(default=True, description="是否把重复事件展开为实例"),
     limit: int = Query(default=MAX_LIMIT, ge=1, le=MAX_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
     settings = effective_settings(session)
+    access = calendar_access(session, current.user)
+
+    allowed = access.viewable_ids()
+    if calendar_id:
+        # 只保留调用方真正有权看的日历,越权 id 直接忽略(而不是报错泄露存在性)
+        allowed = [item for item in allowed if item in set(calendar_id)]
+
     # 只有显式给了 start/end 才做日期过滤,否则关键词检索覆盖全部事件
     use_range = bool(start or end)
     date_range = build_range(start, end, settings=settings) if use_range else None
@@ -73,24 +152,28 @@ def list_events(
         recurring=recurring,
         limit=limit,
         offset=offset,
+        calendar_ids=allowed,
     )
 
     if date_range is None:
-        items: list[dict[str, object]] = [serialize_event(event) for event in events]
+        items: list[dict[str, object]] = [
+            serialize_event(event, access=access) for event in events
+        ]
     elif expand:
         items = []
         for event in events:
             for occurrence in expand_occurrences(event, date_range):
-                items.append(serialize_occurrence(occurrence))
+                items.append(serialize_occurrence(occurrence, access=access))
         items.sort(
             key=lambda item: (str(item.get("start") or ""), str(item.get("title") or ""))
         )
     else:
-        items = [serialize_event(event) for event in events]
+        items = [serialize_event(event, access=access) for event in events]
 
     return {
         "items": items,
         "total": total,
+        "calendars": [calendar.id for calendar in access.calendars],
         "range": (
             {
                 "start": date_range.start_utc.isoformat() + "Z",
@@ -107,12 +190,20 @@ def list_events(
 @router.post("/events", status_code=201, summary="新建事件")
 def create_event_endpoint(
     payload: EventWrite,
-    admin: CsrfHeaderDep,
+    current: CsrfHeaderDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
     settings = effective_settings(session)
+    access = calendar_access(session, current.user)
+    target_calendar_id = _resolve_write_calendar(payload.calendar_id, access)
     try:
-        event = create_event(session, payload, settings=settings)
+        event = create_event(
+            session,
+            payload,
+            settings=settings,
+            calendar_id=target_calendar_id,
+            user_id=current.user_id,
+        )
     except EventValidationError as exc:
         raise _validation_error(exc) from exc
 
@@ -120,25 +211,36 @@ def create_event_endpoint(
     session.commit()
 
     outcome = publish(
-        session, settings=settings, change_type=CHANGE_CREATED, event=event
+        session,
+        settings=settings,
+        change_type=CHANGE_CREATED,
+        event=event,
+        time_text=input_time_text(event, payload.start_at, payload.end_at),
     )
-    logger.info("事件已创建 id=%s sync_ok=%s", event.id, outcome.ok)
-    return {**serialize_event(event), "sync": outcome.as_dict()}
+    logger.info(
+        "事件已创建 id=%s calendar=%s user=%s sync_ok=%s",
+        event.id,
+        target_calendar_id,
+        current.username,
+        outcome.ok,
+    )
+    return {**serialize_event(event, access=access), "sync": outcome.as_dict()}
 
 
 @router.get("/events/{event_id}", summary="读取事件")
 def read_event(
     event_id: str,
-    admin: AdminDep,
+    current: UserDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
-    event = get_event(session, event_id)
+    access = calendar_access(session, current.user)
+    event = get_event(session, event_id, calendar_ids=access.viewable_ids())
     if event is None:
         raise HTTPException(404, error_payload("not_found", "事件不存在或已删除"))
-    payload = serialize_event(event)
+    payload = serialize_event(event, access=access)
     settings = effective_settings(session)
     payload["occurrences"] = [
-        serialize_occurrence(occurrence)
+        serialize_occurrence(occurrence, access=access)
         for occurrence in expand_occurrences(
             event, build_range(None, None, settings=settings, default_days=365)
         )
@@ -150,13 +252,28 @@ def read_event(
 def update_event_endpoint(
     event_id: str,
     payload: EventWrite,
-    admin: CsrfHeaderDep,
+    current: CsrfHeaderDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
     settings = effective_settings(session)
-    event = get_event(session, event_id)
+    access = calendar_access(session, current.user)
+    event = get_event(session, event_id, calendar_ids=access.viewable_ids())
     if event is None:
         raise HTTPException(404, error_payload("not_found", "事件不存在或已删除"))
+    if not access.can_write(event.calendar_id):
+        raise HTTPException(
+            403,
+            error_payload(
+                "forbidden", "你没有修改该事件的权限(家庭共享日历默认只有管理员能改)"
+            ),
+        )
+
+    moved = False
+    if payload.calendar_id and payload.calendar_id != event.calendar_id:
+        target_calendar_id = _resolve_write_calendar(
+            payload.calendar_id, access, existing_event_calendar_id=event.calendar_id
+        )
+        moved = move_event_to_calendar(session, event, target_calendar_id)
 
     try:
         changed = update_event(session, event, payload, settings=settings)
@@ -174,7 +291,7 @@ def update_event_endpoint(
         session.rollback()
         raise _validation_error(exc) from exc
 
-    if not changed:
+    if not changed and not moved:
         session.commit()
         outcome = SyncOutcome(
             ok=True,
@@ -183,26 +300,38 @@ def update_event_endpoint(
             generated_at=None,
             mail_created=0,
         )
-        return {**serialize_event(event), "sync": outcome.as_dict()}
+        return {**serialize_event(event, access=access), "sync": outcome.as_dict()}
 
     mark_export_dirty(session)
     session.commit()
     outcome = publish(
-        session, settings=settings, change_type=CHANGE_UPDATED, event=event
+        session,
+        settings=settings,
+        change_type=CHANGE_UPDATED,
+        event=event,
+        time_text=input_time_text(event, payload.start_at, payload.end_at),
     )
-    return {**serialize_event(event), "sync": outcome.as_dict()}
+    return {**serialize_event(event, access=access), "sync": outcome.as_dict()}
 
 
 @router.delete("/events/{event_id}", summary="软删除事件")
 def delete_event_endpoint(
     event_id: str,
-    admin: CsrfHeaderDep,
+    current: CsrfHeaderDep,
     session: Session = Depends(get_db),
 ) -> dict[str, object]:
     settings = effective_settings(session)
-    event = get_event(session, event_id)
+    access = calendar_access(session, current.user)
+    event = get_event(session, event_id, calendar_ids=access.viewable_ids())
     if event is None:
         raise HTTPException(404, error_payload("not_found", "事件不存在或已删除"))
+    if not access.can_write(event.calendar_id):
+        raise HTTPException(
+            403,
+            error_payload(
+                "forbidden", "你没有删除该事件的权限(家庭共享日历默认只有管理员能改)"
+            ),
+        )
 
     title = event.title
     soft_delete_event(session, event)
@@ -212,5 +341,5 @@ def delete_event_endpoint(
     outcome = publish(
         session, settings=settings, change_type=CHANGE_DELETED, event=event, event_title=title
     )
-    logger.info("事件已软删除 id=%s sync_ok=%s", event_id, outcome.ok)
+    logger.info("事件已软删除 id=%s user=%s sync_ok=%s", event_id, current.username, outcome.ok)
     return {"ok": True, "id": event_id, "sync": outcome.as_dict()}

@@ -2,7 +2,7 @@
   {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
-  <form hx-post="/admin/actions/mail-test"
+  <form hx-post="{{ bp() }}/admin/actions/mail-test"
         hx-target="#mail-status"
         hx-swap="outerHTML"
         class="inline-form">

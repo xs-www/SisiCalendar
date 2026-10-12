@@ -1,4 +1,4 @@
-<div id="agent-tokens" class="agent-tokens">
+<div id="agent-tokens" class="stack">
   {% if new_token %}
     <div class="alert ok">
       <strong>令牌明文只显示这一次,请立即复制保存:</strong>
@@ -9,7 +9,13 @@
   {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
-  <form hx-post="/admin/partials/tokens"
+  <p class="hint">
+    令牌会按<strong>归属账号</strong>的权限落库:Agent 新建的日程写进「默认日历」,
+    权限按归属账号判定,因此不会越权写别人的私人日历。默认日历留空表示用该账号的个人日历。
+  </p>
+
+  {% set default_owner = users | selectattr('is_admin') | list | first %}
+  <form hx-post="{{ bp() }}/admin/partials/tokens"
         hx-target="#agent-tokens"
         hx-swap="outerHTML"
         class="stack">
@@ -19,48 +25,78 @@
         <span>名称 <em>如:iPhone 快捷指令</em></span>
         <input type="text" name="label" maxlength="100" required placeholder="iPhone 快捷指令">
       </label>
+      <label class="field">
+        <span>归属账号</span>
+        <select name="user_id">
+          {% for user in users %}
+            <option value="{{ user.id }}"
+                    {{ 'selected' if default_owner and user.id == default_owner.id else '' }}>
+              {{ user.username }}{{ '(管理员)' if user.is_admin else '' }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <label class="field">
+        <span>默认日历 <em>留空 = 个人日历</em></span>
+        <select name="calendar_id">
+          <option value="">个人日历</option>
+          {% for entry in shared_calendars | default([]) %}
+            <option value="{{ entry.calendar.id }}">{{ entry.calendar.name }}(共享)</option>
+          {% endfor %}
+        </select>
+      </label>
       <button type="submit" class="button primary">生成令牌</button>
     </div>
     <label class="checkbox warn-check">
       <input type="checkbox" name="acknowledge" value="1" required>
-      <span>我确认:该令牌持有者可远程新建日程,并触发向同步人员发送完整日历邮件。</span>
+      <span>我确认:该令牌持有者可按归属账号的权限远程新建日程,并触发向对应收件人发送日历快照。</span>
     </label>
+    <p class="hint">
+      下面的默认日历列出的是全部共享日历;只有归属账号确实有写权限的那一个才能选中,
+      否则保存时会提示换一个日历或先提升权限。
+    </p>
   </form>
 
   {% if tokens %}
     <table class="table">
       <thead>
         <tr>
-          <th>名称</th><th>指纹</th><th>状态</th><th>创建时间</th><th>操作</th>
+          <th>名称</th><th>归属账号</th><th>默认日历</th><th>指纹</th>
+          <th>状态</th><th>创建时间</th><th>操作</th>
         </tr>
       </thead>
       <tbody>
         {% for token in tokens %}
           <tr class="{{ '' if token.enabled else 'muted-row' }}">
             <td>
-              <form hx-post="/admin/partials/tokens/{{ token.id }}"
+              <form hx-post="{{ bp() }}/admin/partials/tokens/{{ token.id }}"
                     hx-target="#agent-tokens" hx-swap="outerHTML" class="inline">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="text" name="label" value="{{ token.label }}" maxlength="100">
                 <button type="submit" class="button ghost small">改名</button>
               </form>
             </td>
+            <td>
+              {% set owner = (users | selectattr('id', 'equalto', token.user_id) | list | first) if token.user_id else None %}
+              {{ owner.username if owner else '—' }}
+            </td>
+            <td>{{ token.calendar_id or '个人日历' }}</td>
             <td class="mono" title="审计日志里以 agent:{{ token.token_hash[:16] }} 出现">{{ token.token_hash[:16] }}…</td>
             <td>
               <span class="chip {{ 'ok' if token.enabled else '' }}">
                 {{ '已启用' if token.enabled else '已停用' }}
               </span>
             </td>
-            <td>{{ token.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>{{ token.created_at | localtime(default_timezone | default('UTC')) }}</td>
             <td class="row-actions">
-              <form hx-post="/admin/partials/tokens/{{ token.id }}/toggle"
+              <form hx-post="{{ bp() }}/admin/partials/tokens/{{ token.id }}/toggle"
                     hx-target="#agent-tokens" hx-swap="outerHTML" class="inline">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <button type="submit" class="button ghost small">
                   {{ '停用' if token.enabled else '启用' }}
                 </button>
               </form>
-              <form hx-post="/admin/partials/tokens/{{ token.id }}/delete"
+              <form hx-post="{{ bp() }}/admin/partials/tokens/{{ token.id }}/delete"
                     hx-target="#agent-tokens" hx-swap="outerHTML" class="inline"
                     hx-confirm="确定撤销「{{ token.label }}」吗?撤销后该令牌立即失效,无法恢复。">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

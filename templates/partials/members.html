@@ -1,0 +1,261 @@
+<!-- 成员管理:邀请码 / 账号 / 共享日历权限。局部刷新目标是 #members。 -->
+<div id="members" class="stack">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  {# ---------- 邀请码 ---------- #}
+  <section class="card">
+    <header class="card-head">
+      <h2>邀请码</h2>
+      <span class="chip">成员自助注册入口</span>
+    </header>
+    <p class="hint">
+      成员用下面的邀请链接自助注册(链接里已带公开地址 <code>{{ invite_base_url }}…</code>,
+      直接复制粘贴给家人即可);共享日历默认只读,
+      注册后可在下面的「共享日历与权限」表里放开某个日历的写权限。
+      注册时会要求填邮箱并收一次验证码,验证通过后系统会把该成员**固定的订阅地址**发到他的邮箱。
+    </p>
+
+    {% if new_invite_url %}
+      <div class="alert ok">
+        <strong>邀请链接(明文只显示这一次,请立即复制发给成员):</strong>
+        <div class="feed-reveal">
+          <input type="text" class="mono" id="new-invite-url" readonly value="{{ new_invite_url }}"
+                 aria-label="注册链接">
+          <button type="button" class="button small" data-copy="#new-invite-url">复制链接</button>
+        </div>
+        <span class="hint">离开本页后无法再查看明文,只能删除后重建。</span>
+      </div>
+    {% endif %}
+
+    <form hx-post="{{ bp() }}/admin/partials/invites"
+          hx-target="#members"
+          hx-swap="outerHTML"
+          class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <div class="inline-form">
+        <label class="field grow">
+          <span>名称 <em>如:给妈妈</em></span>
+          <input type="text" name="label" maxlength="100" required placeholder="给妈妈">
+        </label>
+        <label class="field">
+          <span>可用次数</span>
+          <input type="number" name="max_uses" min="1" value="1">
+        </label>
+        <label class="field">
+          <span>有效天数 <em>0 = 不过期</em></span>
+          <input type="number" name="valid_days" min="0" value="0">
+        </label>
+        <button type="submit" class="button primary">生成邀请码</button>
+      </div>
+    </form>
+
+    {% if invites %}
+      <table class="table">
+        <thead>
+          <tr>
+            <th>名称</th><th>已用次数</th><th>有效期</th><th>状态</th><th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for invite in invites %}
+            <tr class="{{ '' if invite.enabled else 'muted-row' }}">
+              <td>{{ invite.label }}</td>
+              <td>{{ invite.used_count }}/{{ invite.max_uses }}</td>
+              <td>{{ invite.expires_at | localtime(default_timezone) if invite.expires_at else '不过期' }}</td>
+              <td>
+                <span class="chip {{ 'ok' if invite.enabled and invite.remaining_uses > 0 else '' }}">
+                  {% if not invite.enabled %}
+                    已停用
+                  {% elif invite.remaining_uses <= 0 %}
+                    已用完
+                  {% else %}
+                    可用(剩 {{ invite.remaining_uses }} 次)
+                  {% endif %}
+                </span>
+              </td>
+              <td class="row-actions">
+                <form hx-post="{{ bp() }}/admin/partials/invites/{{ invite.id }}/toggle"
+                      hx-target="#members" hx-swap="outerHTML" class="inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button ghost small">
+                    {{ '停用' if invite.enabled else '启用' }}
+                  </button>
+                </form>
+                <form hx-post="{{ bp() }}/admin/partials/invites/{{ invite.id }}/delete"
+                      hx-target="#members" hx-swap="outerHTML" class="inline"
+                      hx-confirm="确定删除邀请码「{{ invite.label }}」吗?删除后该码立即失效,无法恢复。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button danger small">删除</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty">还没有邀请码。生成一个发给家人,对方就能自己注册账号。</p>
+    {% endif %}
+  </section>
+
+  {# ---------- 账号 ---------- #}
+  <section class="card">
+    <header class="card-head">
+      <h2>账号</h2>
+      <span class="chip">{{ members | length }} 个</span>
+    </header>
+
+    {% if reset_username and new_password %}
+      <div class="alert ok">
+        <strong>{{ reset_username }} 的临时口令只显示这一次:</strong>
+        <div class="feed-reveal">
+          <input type="text" class="mono" readonly value="{{ new_password }}"
+                 aria-label="临时口令">
+        </div>
+        <span class="hint">对方首次登录后必须改口令;请通过可信渠道转交,不要留在聊天记录里。</span>
+      </div>
+    {% endif %}
+
+    <table class="table">
+      <thead>
+        <tr>
+          <th>用户名</th><th>显示名</th><th>角色</th><th>邮箱</th>
+          <th>状态</th><th>最后登录</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for member in members %}
+          <tr class="{{ '' if member.enabled else 'muted-row' }}">
+            <td>
+              {{ member.username }}
+              {% if current_user and member.id == current_user.user_id %}
+                <span class="chip">当前账号</span>
+              {% endif %}
+            </td>
+            <td>{{ member.display_name or '—' }}</td>
+            <td>
+              <span class="chip {{ 'ok' if member.is_admin else '' }}">
+                {{ role_labels.get(member.role, member.role) }}
+              </span>
+            </td>
+            <td>{{ member.email or '—' }}</td>
+            <td>
+              <span class="chip {{ 'ok' if member.enabled else '' }}">
+                {{ '已启用' if member.enabled else '已停用' }}
+              </span>
+            </td>
+            <td>{{ member.last_login_at | localtime(default_timezone) }}</td>
+            <td>
+              <div class="row-actions">
+                <form hx-post="{{ bp() }}/admin/partials/members/{{ member.id }}/toggle"
+                      hx-target="#members" hx-swap="outerHTML" class="inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button ghost small">
+                    {{ '停用' if member.enabled else '启用' }}
+                  </button>
+                </form>
+                <form hx-post="{{ bp() }}/admin/partials/members/{{ member.id }}/reset"
+                      hx-target="#members" hx-swap="outerHTML" class="inline"
+                      hx-confirm="确定重置 {{ member.username }} 的口令吗?旧口令立即失效,新口令只显示一次。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button ghost small">重置口令</button>
+                </form>
+                <form hx-post="{{ bp() }}/admin/partials/members/{{ member.id }}/role"
+                      hx-target="#members" hx-swap="outerHTML" class="role-form">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <select name="role" aria-label="{{ member.username }} 的角色">
+                    <option value="admin" {{ 'selected' if member.role == 'admin' else '' }}>管理员</option>
+                    <option value="member" {{ 'selected' if member.role == 'member' else '' }}>成员</option>
+                  </select>
+                  <button type="submit" class="button ghost small">应用</button>
+                </form>
+                <form hx-post="{{ bp() }}/admin/partials/members/{{ member.id }}/delete"
+                      hx-target="#members" hx-swap="outerHTML" class="inline"
+                      hx-confirm="确定删除账号「{{ member.username }}」吗?他的个人日历与订阅地址会一并删除,共享日历里的历史日程保留。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button danger small">删除</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7"><p class="empty">还没有账号。</p></td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  {# ---------- 共享日历与权限 ---------- #}
+  <section class="card">
+    <header class="card-head">
+      <h2>共享日历与权限</h2>
+      <span class="chip">{{ shared_calendars | length }} 个共享日历</span>
+    </header>
+    <p class="hint">
+      权限含义:<strong>可管理</strong> = 能改这个日历与成员权限,<strong>可编辑</strong> = 能增删改日程,
+      <strong>只读</strong> = 只能看。个人日历不在这里列出,只有本人可见可写。
+    </p>
+
+    {% for entry in shared_calendars %}
+      {% set calendar = entry.calendar %}
+      {% set roles = entry.roles | default({}) %}
+      <section class="cal-perm">
+        <header class="card-head">
+          <h3>
+            <span class="cal-dot" style="background: {{ calendar.color }}"></span>
+            {{ calendar.name }}
+          </h3>
+          <span class="chip">{{ '个人' if calendar.kind == 'personal' else '共享' }}</span>
+        </header>
+        <table class="table">
+          <thead>
+            <tr><th>账号</th><th>权限</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            {% for member in members %}
+              {% set current_role = roles.get(member.id, 'viewer') %}
+              <tr>
+                <td>{{ member.username }}{% if member.display_name %}({{ member.display_name }}){% endif %}</td>
+                <td>
+                  <span class="chip">{{ member_role_labels.get(current_role, current_role) }}</span>
+                </td>
+                <td>
+                  <form hx-post="{{ bp() }}/admin/partials/members/{{ member.id }}/calendar-role"
+                        hx-target="#members" hx-swap="outerHTML" class="role-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="calendar_id" value="{{ calendar.id }}">
+                    <select name="role" aria-label="{{ member.username }} 在 {{ calendar.name }} 的权限">
+                      <option value="owner" {{ 'selected' if current_role == 'owner' else '' }}>可管理</option>
+                      <option value="editor" {{ 'selected' if current_role == 'editor' else '' }}>可编辑</option>
+                      <option value="viewer" {{ 'selected' if current_role == 'viewer' else '' }}>只读</option>
+                    </select>
+                    <button type="submit" class="button ghost small">应用</button>
+                  </form>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+    {% else %}
+      <p class="empty">还没有共享日历。新建一个之后,家庭成员就能在日历页一起看。</p>
+    {% endfor %}
+
+    <form hx-post="{{ bp() }}/admin/partials/shared-calendars"
+          hx-target="#members"
+          hx-swap="outerHTML"
+          class="inline-form">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label class="field grow">
+        <span>日历名称</span>
+        <input type="text" name="name" maxlength="100" required placeholder="家庭日程">
+      </label>
+      <label class="field">
+        <span>颜色</span>
+        <input type="color" name="color" value="#2563eb">
+      </label>
+      <button type="submit" class="button primary">新建共享日历</button>
+    </form>
+    <p class="hint">新成员默认只读;要放开写权限,请在上面每个日历的表里把角色改成「可编辑」。</p>
+  </section>
+</div>

@@ -4,13 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>登录 · {{ calendar_name }}</title>
-  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="{{ asset('css/app.css') }}">
 </head>
 <body class="login-body">
-  <form class="login-card" method="post" action="/login">
+  <form class="login-card" method="post" action="{{ bp() }}/login">
     <h1>{{ calendar_name }}</h1>
-    <p class="muted">仅允许本机访问的管理入口</p>
+    <p class="muted">家庭成员的登录入口</p>
 
+    {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
     {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
     <input type="hidden" name="csrf_token" value="{{ login_csrf }}">
@@ -25,9 +26,9 @@
 
     <button type="submit" class="primary wide">登录</button>
     <p class="hint">
-      口令来自 <code>ADMIN_PASSWORD_HASH</code>/<code>ADMIN_PASSWORD</code>,
-      或首次启动时生成并打印在容器日志中。
+      忘记口令请联系家庭管理员重置;还没有账号?请向管理员索取邀请码。
     </p>
+    <p class="hint">有邀请码了?<a href="{{ bp() }}/register">去注册</a></p>
   </form>
 </body>
 </html>

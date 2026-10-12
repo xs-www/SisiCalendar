@@ -20,20 +20,20 @@
       <dt>内容哈希</dt><dd class="mono">{{ (sync_state.content_hash or '—')[:16] }}…</dd>
       <dt>文件大小</dt><dd>{{ sync_state.size_bytes }} 字节</dd>
       <dt>发布文件</dt><dd>{{ '存在' if sync_state.file_exists else '缺失' }}</dd>
-      <dt>订阅地址</dt><dd class="mono">{{ sync_state.subscription_url }}</dd>
+      <dt>公开面基地址</dt><dd class="mono">{{ sync_state.public_base_url }}</dd>
       <dt>SMTP</dt><dd>{{ '已配置' if sync_state.mail_configured else '未配置' }}</dd>
-      <dt>同步人员</dt><dd>{{ sync_state.recipients_enabled }} 启用 / {{ sync_state.recipients_total }} 总计</dd>
+      <dt>邮件收件人</dt><dd>{{ sync_state.recipients_enabled }} 启用 / {{ sync_state.recipients_total }} 总计</dd>
       <dt>上次成功发送</dt><dd>{{ sync_state.last_delivery_success_at or '—' }}</dd>
     </dl>
 
     <div class="form-actions">
-      <form hx-post="/admin/actions/regenerate" hx-target="#sync-status" hx-swap="outerHTML" class="inline">
+      <form hx-post="{{ bp() }}/admin/actions/regenerate" hx-target="#sync-status" hx-swap="outerHTML" class="inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="button">重新生成 ICS</button>
       </form>
 
-      <form hx-post="/admin/actions/send-latest" hx-target="#sync-status" hx-swap="outerHTML" class="inline"
-            hx-confirm="将向全部启用人员发送完整日历快照,确认继续?">
+      <form hx-post="{{ bp() }}/admin/actions/send-latest" hx-target="#sync-status" hx-swap="outerHTML" class="inline"
+            hx-confirm="将向全部启用人员发送尚未结束的日程快照(已结束的日程不在附件里),确认继续?">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <input type="hidden" name="confirm" value="1">
         <button type="submit" class="button primary" {{ 'disabled' if not sync_state.mail_configured else '' }}>
@@ -82,7 +82,7 @@
               <td class="ellipsis" title="{{ delivery.error_message or '' }}">{{ delivery.error_message or '—' }}</td>
               <td>
                 {% if delivery.status != 'sent' %}
-                  <form hx-post="/admin/actions/retry/{{ delivery.id }}" hx-target="#sync-status" hx-swap="outerHTML" class="inline">
+                  <form hx-post="{{ bp() }}/admin/actions/retry/{{ delivery.id }}" hx-target="#sync-status" hx-swap="outerHTML" class="inline">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <button type="submit" class="button ghost small">重试</button>
                   </form>

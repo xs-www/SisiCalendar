@@ -7,15 +7,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
+from app import urls
 from app.config import Settings, get_settings
 from app.exporter import ExportError, export_calendar, get_state, mark_dirty
 from app.mailqueue import ensure_delivery_tasks
 from app.models import CHANGE_MANUAL, Event
-from app.timeutil import iso_utc, utc_to_local
+from app.timeutil import input_utc_offset, iso_utc, utc_to_local
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,24 @@ def mark_export_dirty(session: Session) -> None:
     mark_dirty(session)
 
 
-def event_time_text(event: Event) -> str:
-    """给邮件正文与界面用的一行时间描述。"""
+def offset_label(offset: timedelta) -> str:
+    """把固定偏移量渲染成 `UTC+11:00` / `UTC-05:30` / `UTC`。"""
+    seconds = int(offset.total_seconds())
+    if seconds == 0:
+        return "UTC"
+    sign = "+" if seconds > 0 else "-"
+    hours, minutes = divmod(abs(seconds) // 60, 60)
+    return f"UTC{sign}{hours:02d}:{minutes:02d}"
+
+
+def event_time_text(event: Event, *, utc_offset: timedelta | None = None) -> str:
+    """给邮件正文用的一行时间描述。
+
+    默认按事件的参照时区(`event.timezone`)表述。给出 `utc_offset` 时改按该固定偏移
+    表述,并把标签写成 `UTC+11:00`:调用方提交时间时带了偏移量,说明它知道「自己
+    当时的钟点」,邮件正文就直接说这个钟点——而事件的参照时区保持不变,订阅日历
+    仍然按收件人所在地显示。
+    """
     tz_name = event.timezone or "UTC"
     if event.all_day:
         start = event.start_date
@@ -60,17 +77,39 @@ def event_time_text(event: Event) -> str:
         return f"{start.isoformat()} 至 {date.fromordinal(end.toordinal() - 1).isoformat()}(全天)"
     if event.start_at_utc is None or event.end_at_utc is None:
         return "时间未设置"
-    start_local = utc_to_local(event.start_at_utc, tz_name)
-    end_local = utc_to_local(event.end_at_utc, tz_name)
+    if utc_offset is None:
+        start_local = utc_to_local(event.start_at_utc, tz_name)
+        end_local = utc_to_local(event.end_at_utc, tz_name)
+        label = tz_name
+    else:
+        zone = timezone(utc_offset)
+        start_local = event.start_at_utc.replace(tzinfo=UTC).astimezone(zone)
+        end_local = event.end_at_utc.replace(tzinfo=UTC).astimezone(zone)
+        label = offset_label(utc_offset)
     if start_local.date() == end_local.date():
         return (
             f"{start_local.strftime('%Y-%m-%d %H:%M')}–{end_local.strftime('%H:%M')}"
-            f"({tz_name})"
+            f"({label})"
         )
     return (
         f"{start_local.strftime('%Y-%m-%d %H:%M')} 至 "
-        f"{end_local.strftime('%Y-%m-%d %H:%M')}({tz_name})"
+        f"{end_local.strftime('%Y-%m-%d %H:%M')}({label})"
     )
+
+
+def input_time_text(event: Event, *submitted: str | None) -> str:
+    """按调用方提交文本里的偏移量渲染时间行。
+
+    依次尝试每个提交值(`start_at`、`end_at`),取第一个带偏移量的;都没带偏移量
+    (网页表单的 `datetime-local`、纯日期、只给了 `duration_minutes`)时按事件时区渲染。
+    注意不能用 `a or b`:UTC 的偏移量是 `timedelta(0)`,布尔值是假。
+    """
+    offset: timedelta | None = None
+    for value in submitted:
+        offset = input_utc_offset(value)
+        if offset is not None:
+            break
+    return event_time_text(event, utc_offset=offset)
 
 
 def _persist_failure(session: Session, message: str) -> None:
@@ -178,7 +217,7 @@ def state_snapshot(session: Session, *, settings: Settings | None = None) -> dic
         "last_error": state.last_error,
         "size_bytes": size,
         "file_exists": path.exists(),
-        "subscription_url": resolved.subscription_url,
+        "public_base_url": urls.public_base_url(resolved),
         "mail_configured": resolved.mail_configured,
     }
 

@@ -17,6 +17,7 @@ import getpass
 import json
 import logging
 import sys
+from pathlib import Path
 
 from app.backup import create_backup, list_backups, prune_backups, restore_backup
 from app.config import Settings, get_settings
@@ -27,6 +28,9 @@ from app.security import ensure_admin_credential, hash_password, load_admin_hash
 from app.sync_service import overview, publish, repair_if_needed
 
 logger = logging.getLogger("app.cli")
+
+#: 仓库根目录(提示用户用盘符路径指向 `./data` 时用)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _configure_logging() -> None:
@@ -121,7 +125,7 @@ def cmd_process_mail(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_hash_password(args: argparse.Namespace, settings: Settings) -> int:
-    password = args.password or getpass.getpass("请输入新的管理员口令:")
+    password = args.password or getpass.getpass("请输入新的家庭管理员口令:")
     if not password:
         print("口令不能为空", file=sys.stderr)
         return 2
@@ -183,10 +187,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _warn_if_container_path(settings: Settings) -> None:
+    """提醒「命令行操作的其实是另一个数据库」。
+
+    `.env` 里的 `DATA_DIR=/data` 是为容器准备的;在 Windows 宿主机上直接跑 CLI 时,
+    `/data` 会被解析成**当前盘符根目录**下的 `\\data`(例如 `D:\\data`),于是命令会
+    悄悄操作另一个(可能是空的)数据库——备份看起来成功了,备的却不是线上那份。
+    判据:仓库里存在 `./data/calendar.db`,而这次用的 `DATA_DIR` 指向别处。
+    """
+    repo_db = PROJECT_ROOT / "data" / "calendar.db"
+    try:
+        same = Path(settings.data_dir).resolve() == repo_db.parent.resolve()
+    except OSError:  # pragma: no cover - 路径异常时不做判断
+        same = True
+    if repo_db.exists() and not same:
+        logger.warning(
+            "本次操作的数据库是 %s,而仓库里另有一份 %s。",
+            settings.database_url,
+            repo_db,
+        )
+        logger.warning(
+            "若你本想操作仓库/线上那份,请显式指定盘符路径:"
+            "$env:DATA_DIR='%s'; uv run python -m app.cli ...",
+            repo_db.parent,
+        )
+    else:
+        logger.info("数据库:%s", settings.database_url)
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_logging()
     args = build_parser().parse_args(argv)
     settings = get_settings()
+    _warn_if_container_path(settings)
     settings.ensure_directories()
     return int(args.func(args, settings))
 

@@ -1,0 +1,122 @@
+<!-- 我的设置面板:资料 / 口令 / 订阅地址。局部刷新目标是 #me-panel。 -->
+<div id="me-panel">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <section class="grid-2">
+    <form class="card"
+          hx-post="{{ bp() }}/admin/actions/profile"
+          hx-target="#me-panel"
+          hx-swap="outerHTML">
+      <header class="card-head">
+        <h2>个人资料</h2>
+        <span class="chip">{{ profile.display_name | default('') or (current_user.username if current_user else '我') }}</span>
+      </header>
+
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label class="field">
+        <span>显示名 <em>别人在日历与邮件里看到的名字</em></span>
+        <input type="text" name="display_name" maxlength="100"
+               value="{{ profile.display_name | default('') }}"
+               placeholder="{{ current_user.username if current_user else '未命名' }}">
+      </label>
+
+      <label class="field">
+        <span>邮箱 <em>必填 · 用于验证与收信</em></span>
+        <input type="email" name="email" maxlength="320"
+               value="{{ profile.email | default('') }}" placeholder="name@example.com">
+      </label>
+      <p class="hint">
+        邮箱用于接收邮件通知:填了就会收到<strong>你自己可见日历里尚未结束</strong>的日程快照;
+        留空即停止收信。它同时是登录账号的联系方式,不会展示给其他成员之外的任何人。
+        <strong>新填或修改邮箱都需要重新验证一次</strong>:系统会发一封验证码邮件到该邮箱。
+      </p>
+      {% if verify_state and verify_state.needs_verification %}
+        <div class="alert error">
+          邮箱 <code>{{ profile.email }}</code> 还没有通过验证。<br>
+          未验证期间:不接收日历邮件,也不会收到自己的订阅地址邮件。
+          <a href="{{ bp() }}/verify-email">去验证 →</a>
+        </div>
+      {% elif verify_state and verify_state.verified_at %}
+        <p class="hint">
+          邮箱已验证({{ verify_state.verified_at | localtime(default_timezone | default('UTC')) }})。
+        </p>
+      {% endif %}
+
+      <div class="field-row">
+        <label class="field">
+          <span>日历颜色</span>
+          <input type="color" name="color" value="{{ profile.color | default('#2563eb') }}">
+        </label>
+        <label class="field">
+          <span>我的时区 <em>可选</em></span>
+          <select name="timezone" id="profile-timezone">
+            <option value="" {{ 'selected' if not profile.timezone else '' }}>跟随应用默认时区</option>
+            {% for region, items in timezone_groups | default([]) %}
+              <optgroup label="{{ region }}">
+                {% for item in items %}
+                  <option value="{{ item.iana }}" {{ 'selected' if item.iana == current_timezone else '' }}>
+                    {{ item.index }}. {{ item.label }}({{ item.iana }})
+                  </option>
+                {% endfor %}
+              </optgroup>
+            {% endfor %}
+            {% if current_timezone and current_timezone not in timezone_known | default([]) %}
+              <option value="{{ current_timezone }}" selected>
+                {{ current_timezone }}(当前值,不在常用清单中)
+              </option>
+            {% endif %}
+          </select>
+        </label>
+      </div>
+      <p class="hint">
+        选「跟随应用默认时区」就跟着管理员的全局设置走;也可以在这里单独指定自己的时区,
+        日历与邮件里的时间都会按它展示。
+      </p>
+
+      <div class="form-actions">
+        <button type="submit" class="button primary">保存资料</button>
+      </div>
+    </form>
+
+    <form class="card"
+          hx-post="{{ bp() }}/admin/actions/password"
+          hx-target="#me-panel"
+          hx-swap="outerHTML">
+      <header class="card-head">
+        <h2>修改口令</h2>
+      </header>
+
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <label class="field">
+        <span>当前口令</span>
+        <input type="password" name="current_password" autocomplete="current-password" required>
+      </label>
+      <label class="field">
+        <span>新口令</span>
+        <input type="password" name="new_password" autocomplete="new-password" required>
+      </label>
+      <label class="field">
+        <span>确认新口令</span>
+        <input type="password" name="new_password_confirm" autocomplete="new-password" required>
+      </label>
+      <p class="hint">
+        口令只保存为 Argon2 哈希,管理员重置时会生成一次性临时口令,首次登录后必须自行修改。
+      </p>
+
+      <div class="form-actions">
+        <button type="submit" class="button primary">更新口令</button>
+      </div>
+    </form>
+  </section>
+
+  <section class="card">
+    <header class="card-head">
+      <h2>我的订阅地址</h2>
+      <span class="chip">只读 · 每人一条</span>
+    </header>
+    {% include "partials/feeds.html" %}
+  </section>
+</div>

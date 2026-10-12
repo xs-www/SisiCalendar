@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     calendar_name: str = "Sisi Calendar"
     default_timezone: str = "Australia/Brisbane"
     default_event_duration_minutes: int = 60
-    subscription_url: str = "https://sisi-laptop.tail921448.ts.net/calendar"
+    #: 对外公开的基地址。路径部分就是公开面的挂载前缀(`https://节点/calendar` → 前缀
+    #: `/calendar`):邀请链接、每人的订阅地址、邮件正文里的地址都从它派生。
+    #: 本机管理页不受影响,仍可用裸路径 `http://localhost:443/admin` 访问。
+    public_base_url: str = "https://sisi-laptop.tail921448.ts.net/calendar"
     feed_cache_seconds: int = 300
 
     # ---------- SMTP ----------
@@ -67,6 +70,12 @@ class Settings(BaseSettings):
     smtp_from_address: str | None = None
     smtp_from_name: str = "Sisi Calendar"
     smtp_timeout_seconds: int = 30
+
+    # ---------- 邮箱验证 ----------
+    #: 验证码有效期、可尝试次数与重发冷却(单位:秒)
+    email_code_ttl_seconds: int = 30 * 60
+    email_code_max_attempts: int = 5
+    email_code_resend_seconds: int = 60
 
     # ---------- 邮件重试 ----------
     mail_max_attempts: int = 5
@@ -94,8 +103,16 @@ class Settings(BaseSettings):
 
     @property
     def calendar_path(self) -> Path:
-        """对外发布的派生文件,不允许用户直接编辑。"""
+        """导出的**并集**文件(内部一致性产物),不允许用户直接编辑,也不对外暴露。"""
         return self.export_dir / "calendar.ics"
+
+    @property
+    def feed_dir(self) -> Path:
+        """按订阅目标发布的 ICS:`user-<id>.ics` 与 `family.ics`。
+
+        对外只暴露这些文件(经 `/calendar/<令牌>.ics`),并集文件留在 `export/` 里。
+        """
+        return self.export_dir / "feeds"
 
     @property
     def snapshot_dir(self) -> Path:
@@ -123,6 +140,13 @@ class Settings(BaseSettings):
                 continue
             values.append(max(0, int(chunk)))
         return values or [1, 5, 15, 60, 180]
+
+    @property
+    def public_base_path(self) -> str:
+        """公开面的挂载前缀,取自 `PUBLIC_BASE_URL` 的路径部分(如 `/calendar`)。"""
+        from app.urls import public_base_path
+
+        return public_base_path(self)
 
     @property
     def mail_configured(self) -> bool:
@@ -158,6 +182,7 @@ class Settings(BaseSettings):
         for path in (
             self.data_dir,
             self.export_dir,
+            self.feed_dir,
             self.snapshot_dir,
             self.backup_dir,
         ):

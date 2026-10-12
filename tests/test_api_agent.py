@@ -71,7 +71,8 @@ def test_session_cookie_does_not_authorize_agent_endpoint(agent_client: TestClie
 
 
 def test_agent_creates_event_and_syncs(
-    agent_client: TestClient, agent_headers: dict[str, str]
+    agent_client: TestClient, agent_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     response = _post(agent_client, agent_headers)
     assert response.status_code == 201, response.text
@@ -83,7 +84,7 @@ def test_agent_creates_event_and_syncs(
     assert body["sync"]["ok"] is True
     assert body["start_at_utc"] == "2026-11-03T04:00:00Z", "本地时间应按事件时区换算"
 
-    feed = agent_client.get("/calendar")
+    feed = agent_client.get(owner_feed_path)
     assert feed.status_code == 200
     calendar = Calendar.from_ical(feed.content)
     titles = [str(component["SUMMARY"]) for component in calendar.walk("VEVENT")]
@@ -91,7 +92,8 @@ def test_agent_creates_event_and_syncs(
 
 
 def test_client_ref_makes_retry_idempotent(
-    agent_client: TestClient, agent_headers: dict[str, str]
+    agent_client: TestClient, agent_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     first = _post(agent_client, agent_headers, client_ref="meeting-2026-11-03")
     assert first.status_code == 201
@@ -108,16 +110,17 @@ def test_client_ref_makes_retry_idempotent(
     listed = agent_client.get("/api/v1/events", params={"source": "agent"})
     # 未登录的列表接口不可用,这里改用订阅内容确认只有一条
     assert listed.status_code == 401
-    calendar = Calendar.from_ical(agent_client.get("/calendar").content)
+    calendar = Calendar.from_ical(agent_client.get(owner_feed_path).content)
     assert len(calendar.walk("VEVENT")) == 1
 
 
 def test_different_client_ref_creates_separate_events(
-    agent_client: TestClient, agent_headers: dict[str, str]
+    agent_client: TestClient, agent_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     _post(agent_client, agent_headers, client_ref="ref-a")
     _post(agent_client, agent_headers, client_ref="ref-b")
-    calendar = Calendar.from_ical(agent_client.get("/calendar").content)
+    calendar = Calendar.from_ical(agent_client.get(owner_feed_path).content)
     assert len(calendar.walk("VEVENT")) == 2
 
 
@@ -139,7 +142,8 @@ def test_validation_errors_are_structured(
 
 
 def test_all_day_event_via_agent(
-    agent_client: TestClient, agent_headers: dict[str, str]
+    agent_client: TestClient, agent_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     response = _post(
         agent_client,
@@ -155,7 +159,7 @@ def test_all_day_event_via_agent(
     assert body["all_day"] is True
     assert body["start_date"] == "2026-11-05"
 
-    calendar = Calendar.from_ical(agent_client.get("/calendar").content)
+    calendar = Calendar.from_ical(agent_client.get(owner_feed_path).content)
     assert calendar.walk("VEVENT")[0]["DTSTART"].params.get("VALUE") == "DATE"
 
 
@@ -294,7 +298,8 @@ def test_duration_defaults_to_setting_when_end_missing(
 
 
 def test_lenient_datetime_formats(
-    agent_client: TestClient, agent_headers: dict[str, str]
+    agent_client: TestClient, agent_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     for index, start in enumerate(["2026/11/08 14:00", "2026年11月8日 14:00", "2026-11-08"]):
         response = agent_client.post(
@@ -308,7 +313,7 @@ def test_lenient_datetime_formats(
         )
         assert response.status_code == 201, f"{start} 解析失败:{response.text}"
 
-    calendar = Calendar.from_ical(agent_client.get("/calendar").content)
+    calendar = Calendar.from_ical(agent_client.get(owner_feed_path).content)
     summaries = sorted(str(c["SUMMARY"]) for c in calendar.walk("VEVENT"))
     assert summaries == ["宽松格式 0", "宽松格式 1", "宽松格式 2"]
 

@@ -75,9 +75,11 @@ def test_common_security_headers(
     assert response.headers["x-frame-options"] == "DENY"
 
 
-def test_feed_is_not_served_with_admin_csp(client: TestClient) -> None:
+def test_feed_is_not_served_with_admin_csp(
+    client: TestClient, app_owner_feed_path: str
+) -> None:
     """订阅接口是给日历客户端消费的,不该套管理页的 CSP。"""
-    response = client.get("/calendar")
+    response = client.get(app_owner_feed_path)
     assert response.status_code == 200
     assert "content-security-policy" not in response.headers
     assert response.headers["x-content-type-options"] == "nosniff"

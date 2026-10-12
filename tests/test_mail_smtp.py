@@ -31,6 +31,14 @@ from app.timeutil import utcnow
 from sqlalchemy import select
 
 
+@pytest.fixture(autouse=True)
+def events_land_in_shared_calendar(request):
+    """本模块的收件人都是外部邮箱,附件范围是家庭共享日历(详见 conftest 同名夹具)。"""
+    if "session" not in request.fixturenames:
+        return
+    request.getfixturevalue("patch_create_event_to_shared")
+
+
 class FakeSmtpServer:
     """够用的本地 SMTP 服务器:EHLO / AUTH PLAIN / MAIL / RCPT / DATA / QUIT。"""
 
@@ -283,8 +291,10 @@ def test_real_smtp_conversation(
     body = message.get_body(preferencelist=("plain",))
     assert body is not None
     text = body.get_content()
-    assert "完整日历快照" in text
-    assert smtp_settings.subscription_url in text
+    assert "尚未结束的日程" in text
+    # 家庭版:外部邮箱只是替别人收信,正文里不带任何订阅地址(那会泄露账号的地址)
+    assert "sisi_feed_" not in text
+    assert "长期订阅地址" in text
 
     attachments = list(message.iter_attachments())
     assert len(attachments) == 1

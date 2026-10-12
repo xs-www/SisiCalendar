@@ -135,6 +135,18 @@ textarea { resize: vertical; }
 .checkbox input { width: auto; }
 .warn-check { align-items: flex-start; color: var(--warn); font-size: 12px; margin-top: 8px; }
 
+/* 提醒勾选组:常用预设横排换行,自定义分钟数单独一行 */
+.reminder-field {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px 2px;
+  margin: 0 0 12px;
+}
+.reminder-field > legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
+.reminder-field > legend em { font-style: normal; color: #9aa1ae; }
+.checkbox-group { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 10px; }
+.checkbox-group .checkbox { font-size: 13px; }
+
 .inline-form, .inline { display: inline-flex; gap: 10px; align-items: flex-end; }
 .inline-form { width: 100%; }
 .form-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
@@ -192,8 +204,9 @@ textarea { resize: vertical; }
   border-bottom: 1px solid var(--line);
   vertical-align: middle;
 }
-.table th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.table th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; }
 .table tr:last-child td { border-bottom: none; }
+.table td.row-actions, .table td .row-actions { white-space: nowrap; }
 .muted-row td { color: var(--muted); }
 .row-actions { display: flex; gap: 6px; }
 .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -260,3 +273,116 @@ textarea { resize: vertical; }
 }
 .toast.error { background: var(--danger); }
 .toast.ok { background: var(--ok); }
+
+/* ---------- 顶栏账号区 ---------- */
+.user-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 16px;
+  padding-left: 14px;
+  border-left: 1px solid var(--line);
+  font-size: 13px;
+}
+.user-label { font-weight: 600; }
+.user-name { color: var(--muted); font-size: 12px; }
+.user-box .logout { margin-left: 6px; }
+
+/* ---------- 日历页:侧栏 + 多日历勾选 ---------- */
+.calendar-layout {
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.calendar-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: sticky;
+  top: 14px;
+}
+.calendar-sidebar .button.wide { width: 100%; justify-content: center; }
+/* 侧栏主操作:别做成贴边的蓝色长条,给点呼吸与层次 */
+.sidebar-cta {
+  padding: 9px 14px;
+  box-shadow: 0 1px 2px rgba(47, 111, 237, .28);
+}
+.sidebar-cta .icon { width: 14px; height: 14px; flex: none; }
+.sidebar-label {
+  margin: 16px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.calendar-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  overflow: hidden;
+}
+.calendar-list li + li .calendar-item { border-top: 1px solid var(--line); }
+.calendar-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.calendar-item:hover { background: #f5f7fb; }
+.calendar-item input { width: auto; margin: 0; flex: none; }
+.calendar-item .cal-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cal-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+  display: inline-block;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12);
+}
+.cal-dot.small { width: 8px; height: 8px; }
+.cal-chip { border: none; font: inherit; cursor: pointer; }
+
+/* ---------- 订阅地址 ---------- */
+.feed-reveal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.feed-reveal input {
+  flex: 1;
+  min-width: 220px;
+  font-size: 12px;
+  background: #fff;
+  color: var(--ink);
+}
+/* 复制按钮的即时反馈:成功后短暂变绿 */
+.button.copy-ok { background: #e6f4ec; border-color: #bfe3cd; color: var(--ok); }
+.button.copy-fail { background: #fdecea; border-color: #f0c7c2; color: var(--danger); }
+.sub-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* ---------- 邀请码 / 权限小表 ---------- */
+.cal-perm { margin-top: 2px; }
+.cal-perm .table th, .cal-perm .table td { padding: 5px 8px; font-size: 12px; }
+.role-form { display: inline-flex; gap: 6px; align-items: center; }
+.role-form select { width: auto; min-width: 110px; }
+
+@media (max-width: 900px) {
+  .calendar-layout { grid-template-columns: 1fr; }
+  .calendar-sidebar { position: static; order: -1; }
+  .topbar { flex-wrap: wrap; }
+  .user-box { margin-left: auto; }
+}

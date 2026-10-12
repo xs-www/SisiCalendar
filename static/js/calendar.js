@@ -1,4 +1,4 @@
-/* 日历视图:月 / 周 / 日 / 列表,支持筛选与拖动确认。 */
+/* 日历视图:多日历着色 + 侧栏勾选,支持筛选与拖动确认。 */
 (function () {
   "use strict";
 
@@ -7,9 +7,62 @@
     return;
   }
 
-  const api = host.dataset.api || "/api/v1";
+  // 公开前缀:从 `/calendar/...` 进来的页面要回到 `/calendar/...`,从裸路径进来则不加前缀
+  const basePath = (document.body && document.body.dataset.basePath) || "";
+  const api = host.dataset.api || basePath + "/api/v1";
   const csrf = host.dataset.csrf || "";
   const filters = { q: "", status: "", kind: "", recurring: "", source: "" };
+
+  // ---------- 日历表(由模板通过 data-calendars 传入) ----------
+  function parseCalendarOptions() {
+    const raw = host.dataset.calendars || "[]";
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  const calendarOptions = parseCalendarOptions();
+  const calendarById = {};
+  calendarOptions.forEach(function (item) {
+    if (item && item.id) {
+      calendarById[item.id] = item;
+    }
+  });
+
+  function filterBoxes() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll('input[name="calendar-filter"]')
+    );
+  }
+
+  /* 勾选中的日历 id;没有任何勾选框时视为全部可见日历。 */
+  function selectedCalendarIds() {
+    const boxes = filterBoxes();
+    if (!boxes.length) {
+      return [];
+    }
+    return boxes
+      .filter(function (box) {
+        return box.checked;
+      })
+      .map(function (box) {
+        return box.dataset.calendarId || box.value;
+      })
+      .filter(Boolean);
+  }
+
+  function hasSelection() {
+    const boxes = filterBoxes();
+    if (!boxes.length) {
+      return true;
+    }
+    return boxes.some(function (box) {
+      return box.checked;
+    });
+  }
 
   // ---------- 提示 ----------
   function toast(message, kind) {
@@ -45,6 +98,9 @@
     params.set("start", info.startStr);
     params.set("end", info.endStr);
     params.set("expand", "true");
+    selectedCalendarIds().forEach(function (id) {
+      params.append("calendar_id", id);
+    });
     if (filters.q) params.set("q", filters.q);
     if (filters.status) params.set("status", filters.status);
     if (filters.kind === "all_day") params.set("all_day", "true");
@@ -55,15 +111,26 @@
     return api + "/events?" + params.toString();
   }
 
+  function colorOf(item) {
+    if (item.calendar_color) {
+      return item.calendar_color;
+    }
+    const option = calendarById[item.calendar_id];
+    return option && option.color ? option.color : null;
+  }
+
   function toCalendarEvent(item) {
     const recurring = Boolean(item.recurring);
-    return {
+    // 只读日历(或重复事件的实例)不可拖动改期
+    const writable = item.can_write !== false && !recurring;
+    const color = colorOf(item);
+    const event = {
       id: item.id,
       title: item.title,
       start: item.start,
       end: item.end,
       allDay: Boolean(item.allDay),
-      editable: !recurring,
+      editable: writable,
       classNames: item.status === "cancelled" ? ["ev-cancelled"] : [],
       extendedProps: {
         event_id: item.event_id || item.id,
@@ -71,22 +138,37 @@
         timezone: item.timezone || "",
         location: item.location || "",
         description: item.description || "",
+        url: item.url || "",
+        reminder_labels: item.reminder_labels || [],
         rrule_label: item.rrule_label || "",
         status: item.status || "confirmed",
         source: item.source || "web",
-        updated_at: item.updated_at || ""
+        updated_at: item.updated_at || "",
+        calendar_id: item.calendar_id || "",
+        calendar_name: item.calendar_name || "",
+        can_write: item.can_write !== false
       }
     };
+    if (color) {
+      event.backgroundColor = color;
+      event.borderColor = color;
+    }
+    return event;
   }
 
   async function loadEvents(info, success, failure) {
+    // 一个日历都没勾选时不打扰后端,直接显示空日历
+    if (!hasSelection()) {
+      success([]);
+      return;
+    }
     try {
       const response = await fetch(buildUrl(info), {
         headers: { Accept: "application/json" },
         credentials: "same-origin"
       });
       if (response.status === 401) {
-        window.location.href = "/login?next=/admin";
+        window.location.href = basePath + "/login?next=" + encodeURIComponent(basePath + "/admin");
         return;
       }
       if (!response.ok) {
@@ -124,6 +206,11 @@
     if (props.recurring) {
       info.revert();
       toast("重复事件的单个实例暂不支持拖动修改,请编辑原始日程。", "error");
+      return;
+    }
+    if (props.can_write === false) {
+      info.revert();
+      toast("你没有修改该事件所在日历的权限。", "error");
       return;
     }
 
@@ -188,28 +275,43 @@
       params.set("start", info.startStr);
       params.set("end", info.endStr);
       params.set("all_day", info.allDay ? "1" : "0");
-      window.location.href = "/admin/events/new?" + params.toString();
+      window.location.href = basePath + "/admin/events/new?" + params.toString();
     },
     eventClick: function (info) {
       const props = info.event.extendedProps || {};
       if (props.recurring && !window.confirm("这是重复事件的一个实例,将打开整个系列进行编辑,继续?")) {
         return;
       }
-      window.location.href = "/admin/events/" + encodeURIComponent(props.event_id);
+      window.location.href = basePath + "/admin/events/" + encodeURIComponent(props.event_id);
     },
     eventDrop: handleMove,
     eventResize: handleMove,
     eventDidMount: function (info) {
       const props = info.event.extendedProps || {};
       const bits = [];
+      if (props.calendar_name) bits.push("日历:" + props.calendar_name);
       if (props.timezone) bits.push("时区:" + props.timezone);
       if (props.location) bits.push("地点:" + props.location);
       if (props.rrule_label) bits.push("重复:" + props.rrule_label);
+      if (props.reminder_labels && props.reminder_labels.length) {
+        bits.push("提醒:" + props.reminder_labels.join(" / "));
+      }
+      if (props.url) bits.push("链接:" + props.url);
       if (props.description) bits.push(props.description.slice(0, 160));
       if (bits.length) info.el.title = bits.join("\n");
     }
   });
   calendar.render();
+
+  // ---------- 侧栏:日历勾选 ----------
+  filterBoxes().forEach(function (box) {
+    box.addEventListener("change", function () {
+      if (!hasSelection()) {
+        toast("至少勾选一个日历;当前不显示任何日程。", "error");
+      }
+      calendar.refetchEvents();
+    });
+  });
 
   // ---------- 筛选 ----------
   function readFilters() {

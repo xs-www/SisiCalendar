@@ -4,25 +4,39 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ calendar_name }}{% endblock %}</title>
-  <link rel="stylesheet" href="/static/css/app.css">
-  <script src="/static/vendor/htmx.min.js" defer></script>
+  <link rel="stylesheet" href="{{ asset('css/app.css') }}">
+  <script src="{{ asset('vendor/htmx.min.js') }}" defer></script>
+  <script src="{{ asset('js/copy.js') }}" defer></script>
   {% block head %}{% endblock %}
 </head>
-<body>
+<body data-base-path="{{ bp() }}">
   <header class="topbar">
     <div class="brand">
       <span class="dot"></span>{{ calendar_name }}
       <span class="brand-sub">本机管理</span>
     </div>
     <nav class="mainnav">
-      <a href="/admin" class="{{ 'active' if active == 'calendar' else '' }}">日历</a>
-      <a href="/admin/settings" class="{{ 'active' if active == 'settings' else '' }}">设置</a>
-      <a href="/admin/sync" class="{{ 'active' if active == 'sync' else '' }}">同步状态</a>
+      <a href="{{ bp() }}/admin" class="{{ 'active' if active == 'calendar' else '' }}">日历</a>
+      <a href="{{ bp() }}/admin/me" class="{{ 'active' if active == 'me' else '' }}">我的设置</a>
+      {% if is_admin %}
+        <a href="{{ bp() }}/admin/members" class="{{ 'active' if active == 'members' else '' }}">成员</a>
+        <a href="{{ bp() }}/admin/settings" class="{{ 'active' if active == 'settings' else '' }}">设置</a>
+        <a href="{{ bp() }}/admin/sync" class="{{ 'active' if active == 'sync' else '' }}">同步状态</a>
+      {% endif %}
     </nav>
-    <form class="logout" method="post" action="/logout">
-      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button type="submit" class="ghost">退出</button>
-    </form>
+    <div class="user-box">
+      {% if current_user %}
+        <span class="user-label">{{ current_user.label }}</span>
+        <span class="user-name">{{ current_user.username }}</span>
+        <span class="chip {{ 'ok' if is_admin else '' }}">{{ '管理员' if is_admin else '成员' }}</span>
+        <form class="logout" method="post" action="{{ bp() }}/logout">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="ghost">退出</button>
+        </form>
+      {% else %}
+        <a class="button ghost small" href="{{ bp() }}/login">登录</a>
+      {% endif %}
+    </div>
   </header>
 
   <main class="page">
@@ -31,7 +45,7 @@
 
   <footer class="footer">
     <span>本机管理地址 <code>http://localhost:443/admin</code></span>
-    <span>订阅地址 <code>{{ subscription_url }}</code></span>
+    <span>家人入口 <code>{{ public_base_url }}/login</code></span>
   </footer>
 
   <div id="toast" class="toast" hidden></div>

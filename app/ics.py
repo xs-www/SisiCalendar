@@ -15,12 +15,13 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
-from icalendar import Calendar, Timezone, vRecur
+from icalendar import Alarm, Calendar, Timezone, vRecur
 from icalendar import Event as ICalEvent
 
 from app.config import Settings
 from app.models import Event
 from app.recurrence import RRuleError, rebuild_rule, validate_rrule
+from app.reminders import serialize_reminders
 from app.timeutil import as_aware_utc, get_zone, local_to_utc, utc_to_local, utcnow
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,20 @@ def _component_rrule(event: Event) -> vRecur | None:
         return None
 
 
+def _build_valarm(event: Event, minutes: int) -> Alarm:
+    """把一条提醒转成 `VALARM`:相对事件开始时间的 DISPLAY 提醒。
+
+    触发时间写成 DURATION(`-PT15M`),而不是绝对时间:这样重复事件与跨时区事件
+    都由订阅端按各自实例的开始时间计算,不需要我们为每个实例生成一条独立提醒。
+    全天事件的基准是当天 00:00,因此「提前 1 天」即前一天零点。
+    """
+    alarm = Alarm()
+    alarm.add("action", "DISPLAY")
+    alarm.add("description", event.title or "日程提醒")
+    alarm.add("trigger", timedelta(minutes=-minutes))
+    return alarm
+
+
 def _build_vevent(event: Event, tz_name: str) -> ICalEvent:
     component = ICalEvent()
     component.add("uid", event.uid)
@@ -71,10 +86,12 @@ def _build_vevent(event: Event, tz_name: str) -> ICalEvent:
         component.add("description", event.description)
     if event.location:
         component.add("location", event.location)
+    if event.url:
+        component.add("url", event.url)
 
     # DTSTAMP 取事件自身的修订时间,而不是“导出时刻”。
     # 导出器靠内容哈希判断是否产生新版本;若 DTSTAMP 用挂钟时间,跨秒重新导出就会得到
-    # 不同哈希,于是“没有改动”的保存也会递增版本并向所有同步人员重发完整日历。
+    # 不同哈希,于是“没有改动”的保存也会递增版本并向所有收件人重发快照。
     revision = as_aware_utc(event.updated_at) or as_aware_utc(utcnow())
     component.add("dtstamp", revision)
     component.add("created", as_aware_utc(event.created_at) or revision)
@@ -99,6 +116,10 @@ def _build_vevent(event: Event, tz_name: str) -> ICalEvent:
     rule = _component_rrule(event)
     if rule is not None:
         component.add("rrule", rule)
+
+    # 提醒按列表顺序(已经是从大到小)追加,顺序只取决于数据库状态,保证哈希稳定
+    for minutes in serialize_reminders(event.reminders):
+        component.add_component(_build_valarm(event, minutes))
     return component
 
 
@@ -146,7 +167,7 @@ def build_calendar(
     settings: Settings | None = None,
     exported_at: datetime | None = None,
 ) -> bytes:
-    """生成完整日历文件内容。"""
+    """生成完整(含已结束)日历文件内容。"""
     calendar = Calendar()
     calendar.add("prodid", PRODID)
     calendar.add("version", "2.0")

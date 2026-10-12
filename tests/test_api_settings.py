@@ -112,7 +112,8 @@ def test_recipient_mutations_require_csrf(admin_client: TestClient) -> None:
 
 
 def test_settings_update_and_validation(
-    admin_client: TestClient, api_headers: dict[str, str]
+    admin_client: TestClient, api_headers: dict[str, str],
+    owner_feed_path: str,
 ) -> None:
     ok = admin_client.patch(
         "/api/v1/settings",
@@ -131,7 +132,7 @@ def test_settings_update_and_validation(
     assert "default_timezone" in bad.json()["error"]["fields"]
 
     # 名称覆盖会反映到订阅文件里
-    feed = admin_client.get("/calendar")
+    feed = admin_client.get(owner_feed_path)
     assert b"X-WR-CALNAME" in feed.content
 
 

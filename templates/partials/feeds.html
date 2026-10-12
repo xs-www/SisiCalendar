@@ -1,0 +1,107 @@
+<!-- 我的订阅地址:一条固定的 + 若干临时令牌。局部刷新目标是 #feeds。 -->
+<div id="feeds" class="stack">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <p class="hint">
+    每人一条独立订阅地址:<strong>只能看到你自己的可见日历</strong>(个人日历 + 你能看到的共享日历)。
+    复制到 iPhone 的「日历 → 订阅日历」里填上即可,之后改日程会自动更新,不需要重新订阅。
+  </p>
+
+  {% if fixed_feed_url %}
+    <div class="card">
+      <h3>你的固定订阅地址</h3>
+      <div class="feed-reveal">
+        <input type="text" class="mono" id="fixed-feed-url" readonly value="{{ fixed_feed_url }}"
+               aria-label="固定订阅地址">
+        <button type="button" class="button small" data-copy="#fixed-feed-url">复制</button>
+      </div>
+      <span class="hint">
+        这条地址在你的账号创建时就已确定,<strong>永远不会改变</strong>:换手机、重装 App 都填它;
+        忘记了自己再看一眼即可,也可以在「我的设置」里让它重发到你的邮箱。
+        地址等同于密码,别发到公开群里。
+      </span>
+    </div>
+  {% endif %}
+
+  {% if new_token %}
+    <div class="alert ok">
+      <strong>临时订阅地址明文只显示这一次,请立即复制保存:</strong>
+      <div class="feed-reveal">
+        <input type="text" class="mono" id="new-feed-url" readonly
+               value="{{ subscription_prefix }}/{{ new_token }}.ics"
+               aria-label="新的订阅地址">
+        <button type="button" class="button small" data-copy="#new-feed-url">复制</button>
+      </div>
+      <span class="hint">
+        临时地址适合给某台设备单独用,泄露后可以在这里撤销——撤销只影响这一条,固定地址不受影响。
+      </span>
+    </div>
+  {% endif %}
+
+  <form hx-post="{{ bp() }}/admin/partials/feeds"
+        hx-target="#feeds"
+        hx-swap="outerHTML"
+        class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field grow">
+      <span>名称 <em>便于分辨是哪台设备</em></span>
+      <input type="text" name="label" maxlength="100" required placeholder="我的 iPad">
+    </label>
+    <button type="submit" class="button primary">生成临时订阅地址</button>
+  </form>
+
+  {% if feed_tokens %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>名称</th><th>指纹</th><th>状态</th><th>最后拉取时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for token in feed_tokens %}
+          <tr class="{{ '' if token.enabled else 'muted-row' }}">
+            <td>
+              {{ token.label }}
+              {% if fixed_token_id and token.id == fixed_token_id %}
+                <span class="chip ok">固定</span>
+              {% endif %}
+            </td>
+            <td class="mono" title="库里只保存 sha256,页面只显示指纹">{{ token.token_hash[:16] }}…</td>
+            <td>
+              <span class="chip {{ 'ok' if token.enabled else '' }}">
+                {{ '已启用' if token.enabled else '已停用' }}
+              </span>
+            </td>
+            <td title="{{ token.last_used_at | localtime(default_timezone | default('UTC'), '%Y-%m-%d %H:%M:%S') }}">
+              {{ token.last_used_at | localtime(default_timezone | default('UTC')) }}
+            </td>
+            <td class="row-actions">
+              {% if fixed_token_id and token.id == fixed_token_id %}
+                <span class="hint" title="固定地址由服务端派生,随时可重新获取,因此不提供停用或撤销">
+                  不可撤销
+                </span>
+              {% else %}
+                <form hx-post="{{ bp() }}/admin/partials/feeds/{{ token.id }}/toggle"
+                      hx-target="#feeds" hx-swap="outerHTML" class="inline">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button ghost small">
+                    {{ '停用' if token.enabled else '启用' }}
+                  </button>
+                </form>
+                <form hx-post="{{ bp() }}/admin/partials/feeds/{{ token.id }}/delete"
+                      hx-target="#feeds" hx-swap="outerHTML" class="inline"
+                      hx-confirm="确定撤销「{{ token.label }}」吗?撤销后该订阅地址立即失效,需要重新订阅。">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button type="submit" class="button danger small">撤销</button>
+                </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">固定地址正在生成,请刷新本页。</p>
+  {% endif %}
+</div>

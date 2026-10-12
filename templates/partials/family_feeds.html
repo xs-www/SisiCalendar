@@ -1,0 +1,77 @@
+<!-- 家庭订阅地址:给没有账号的外部订阅者(如长辈的 iPhone)。局部刷新目标是 #family-feeds。 -->
+<div id="family-feeds" class="stack">
+  {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+  {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+  <p class="hint">
+    这类地址<strong>只包含家庭共享日历</strong>,不含任何人的私人日程,适合发给没有账号的外部订阅者
+    (例如长辈的手机)。每位订阅者建议单独建一条,换设备或链接外泄时只需撤销那一条。
+    明文只在创建时显示一次。
+  </p>
+
+  {% if new_token %}
+    <div class="alert ok">
+      <strong>家庭订阅地址明文只显示这一次,请立即复制保存:</strong>
+      <div class="feed-reveal">
+        <input type="text" class="mono" id="new-family-feed-url" readonly
+               value="{{ subscription_prefix }}/{{ new_token }}.ics"
+               aria-label="新的家庭订阅地址">
+        <button type="button" class="button small" data-copy="#new-family-feed-url">复制</button>
+      </div>
+      <span class="hint">在 iPhone 的「日历 → 订阅日历」里粘贴这个地址即可。</span>
+    </div>
+  {% endif %}
+
+  <form hx-post="{{ bp() }}/admin/partials/family-feeds"
+        hx-target="#family-feeds"
+        hx-swap="outerHTML"
+        class="inline-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label class="field grow">
+      <span>名称 <em>如:爷爷的 iPad</em></span>
+      <input type="text" name="label" maxlength="100" required value="家庭共享日历">
+    </label>
+    <button type="submit" class="button primary">生成家庭订阅地址</button>
+  </form>
+
+  {% if feed_tokens %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>名称</th><th>指纹</th><th>状态</th><th>最后拉取时间</th><th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for token in feed_tokens %}
+          <tr class="{{ '' if token.enabled else 'muted-row' }}">
+            <td>{{ token.label }}</td>
+            <td class="mono" title="库里只保存 sha256,页面只显示指纹">{{ token.token_hash[:16] }}…</td>
+            <td>
+              <span class="chip {{ 'ok' if token.enabled else '' }}">
+                {{ '已启用' if token.enabled else '已停用' }}
+              </span>
+            </td>
+            <td>{{ token.last_used_at | localtime(default_timezone | default('UTC')) }}</td>
+            <td class="row-actions">
+              <form hx-post="{{ bp() }}/admin/partials/family-feeds/{{ token.id }}/toggle"
+                    hx-target="#family-feeds" hx-swap="outerHTML" class="inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="button ghost small">
+                  {{ '停用' if token.enabled else '启用' }}
+                </button>
+              </form>
+              <form hx-post="{{ bp() }}/admin/partials/family-feeds/{{ token.id }}/delete"
+                    hx-target="#family-feeds" hx-swap="outerHTML" class="inline"
+                    hx-confirm="确定撤销「{{ token.label }}」吗?撤销后该订阅地址立即失效,需要重新订阅。">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="button danger small">撤销</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty">还没有家庭订阅地址。生成一条发给没有账号的家人即可。</p>
+  {% endif %}
+</div>

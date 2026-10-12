@@ -25,9 +25,12 @@ TOKEN_PREFIX = "sisi_"
 MAX_LABEL = 100
 
 
-def generate_token() -> str:
-    """生成一枚新的随机令牌明文(token_urlsafe(32) ≈ 43 字符熵)。"""
-    return TOKEN_PREFIX + secrets.token_urlsafe(32)
+def generate_token(prefix: str = TOKEN_PREFIX) -> str:
+    """生成一枚新的随机令牌明文(token_urlsafe(32) ≈ 43 字符熵)。
+
+    `prefix` 只用于人眼辨识(如订阅令牌用 `sisi_feed_`),不参与鉴权与哈希。
+    """
+    return prefix + secrets.token_urlsafe(32)
 
 
 def hash_token(token: str) -> str:
@@ -49,17 +52,28 @@ def _validate_label(label: object) -> str:
     return text
 
 
-def create_token(session: Session, label: object) -> tuple[str, AgentToken]:
+def create_token(
+    session: Session,
+    label: object,
+    *,
+    user_id: str | None = None,
+    calendar_id: str | None = None,
+) -> tuple[str, AgentToken]:
     """生成一枚新令牌,返回 ``(明文, 记录)``。
 
     明文只在这里出现一次,调用方拿到后应立即交给用户(界面一次提示),
     不要落库、不要写日志。事务由调用方提交。
+
+    `user_id` / `calendar_id` 决定这枚令牌的写入作用域:Agent 用它新建的日程会落到
+    该账号可写的日历里,权限按该账号判定。
     """
     name = _validate_label(label)
     plaintext = generate_token()
     row = AgentToken(
         label=name,
         token_hash=hash_token(plaintext),
+        user_id=user_id or None,
+        calendar_id=calendar_id or None,
         enabled=True,
         created_at=utcnow(),
         updated_at=utcnow(),
@@ -67,6 +81,20 @@ def create_token(session: Session, label: object) -> tuple[str, AgentToken]:
     session.add(row)
     session.flush()
     return plaintext, row
+
+
+def set_scope(
+    session: Session,
+    token: AgentToken,
+    *,
+    user_id: str | None,
+    calendar_id: str | None,
+) -> None:
+    """改令牌归属账号与默认日历。"""
+    token.user_id = user_id or None
+    token.calendar_id = calendar_id or None
+    token.updated_at = utcnow()
+    session.flush()
 
 
 def list_tokens(session: Session) -> list[AgentToken]:
@@ -125,4 +153,5 @@ __all__ = [
     "list_tokens",
     "rename",
     "set_enabled",
+    "set_scope",
 ]

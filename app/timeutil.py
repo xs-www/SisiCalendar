@@ -137,6 +137,26 @@ def parse_iso(value: str | None) -> datetime | None:
     return as_utc(parsed)
 
 
+def input_utc_offset(value: str | None) -> timedelta | None:
+    """取出调用方提交文本里**显式写明**的 UTC 偏移量,没写或解析失败时返回 None。
+
+    用途:`start_at=2026-11-03T14:00:00+11:00` 的偏移量说明提交者当时就在那个时区,
+    它写下的钟点才是提交者眼里的 14:00。事件落库后的参照时区可能是常驻时区
+    (`timezone` 字段或默认时区),两者不一定是同一个,所以邮件正文需要这个偏移量
+    才能按提交者的钟点表述时间。`Z` 视为 `+00:00`(返回零偏移,而不是 None)。
+    """
+    if not value:
+        return None
+    text = normalize_datetime_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.utcoffset()
+
+
 def parse_date(value: str | None) -> date | None:
     if not value:
         return None

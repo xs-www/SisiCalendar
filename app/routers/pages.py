@@ -2,11 +2,23 @@
 
 页面使用 Jinja2 + HTMX:表单类交互走 HTMX 局部刷新,日历本身的增删改走 JSON API
 (由 `static/js/calendar.js` 调用并附带 CSRF 请求头)。
+
+家庭版页面分工:
+
+| 页面 | 谁能进 | 作用 |
+|---|---|---|
+| `/admin` | 所有成员 | 日历(本人可见日历的合并视图,按日历着色) |
+| `/admin/events/*` | 所有成员 | 新建/编辑日程(只能选自己有写权限的日历) |
+| `/admin/me` | 所有成员 | 个人资料、改口令、我自己的订阅地址 |
+| `/admin/members` | 管理员 | 账号、邀请码、共享日历与成员权限 |
+| `/admin/settings` | 管理员 | 全局设置、SMTP、收件人、远程接入令牌、家庭订阅地址 |
+| `/admin/sync` | 管理员 | ICS 版本与邮件队列 |
 """
 
 from __future__ import annotations
 
 import logging
+import secrets
 from datetime import timedelta
 from functools import lru_cache
 from zoneinfo import available_timezones
@@ -16,16 +28,42 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import token_store
+from app import email_verify, feed_tokens, invites, token_store, urls
+from app.accounts import (
+    AccountError,
+    calendar_access,
+    calendar_members_map,
+    create_shared_calendar,
+    delete_user,
+    get_user,
+    list_shared_calendars,
+    list_users,
+    owner_user,
+    set_membership,
+    set_password,
+    set_user_enabled,
+    set_user_role,
+    sync_user_recipient,
+    update_profile,
+    user_timezone,
+)
 from app.config import Settings
 from app.db import get_db
-from app.deps import AdminDep, CsrfDep, templates
+from app.deps import (
+    AdminDep,
+    CsrfAdminDep,
+    CsrfDep,
+    UserDep,
+    optional_user,
+    templates,
+)
 from app.events import get_event, serialize_event
 from app.exporter import get_state
 from app.mailer import MailError, config_from_settings, send_test_mail, test_connection
 from app.mailqueue import process_queue, retry_delivery, send_latest_to_enabled
 from app.models import MailDelivery, SyncRecipient, normalize_email
 from app.recurrence import SIMPLE_LABELS, split_rrule
+from app.reminders import custom_reminder_text, preset_options
 from app.security import AuditLog, rate_limiter
 from app.settings_store import (
     SettingValidationError,
@@ -63,6 +101,9 @@ CHANGE_LABELS = {
     "deleted": "删除",
     "manual": "手动同步",
 }
+
+ROLE_LABELS = {"admin": "管理员", "member": "成员"}
+MEMBER_ROLE_LABELS = {"owner": "可管理", "editor": "可编辑", "viewer": "只读"}
 
 
 @lru_cache(maxsize=1)
@@ -106,41 +147,110 @@ def _deliveries(session: Session, limit: int = 30) -> list[MailDelivery]:
 def _base_context(
     request: Request, session: Session, settings: Settings, *, active: str
 ) -> dict[str, object]:
-    from app.deps import optional_admin
-
-    admin = optional_admin(request)
+    current = optional_user(request, session)
+    tz_name = user_timezone(current.user if current else None, settings)
     return {
         "request": request,
         "active": active,
-        "admin": admin,
-        "csrf_token": admin.csrf_token if admin else "",
+        "current_user": current,
+        "is_admin": bool(current and current.is_admin),
+        "csrf_token": current.csrf_token if current else "",
         "settings": settings,
         "calendar_name": settings.calendar_name,
-        "default_timezone": settings.default_timezone,
-        "subscription_url": settings.subscription_url,
+        "default_timezone": tz_name,
+        "system_timezone": settings.default_timezone,
+        "public_base_url": urls.public_base_url(settings),
         "mail_configured": settings.mail_configured,
-        "now_local": generated_at_display(iso_utc(utcnow()), settings.default_timezone),
+        "now_local": generated_at_display(iso_utc(utcnow()), tz_name),
     }
 
 
+def _csrf_of(request: Request, session: Session) -> str:
+    current = optional_user(request, session)
+    return current.csrf_token if current else ""
+
+
+def _calendar_context(session: Session, user) -> dict[str, object]:
+    """日历页与表单共用的日历清单(带颜色与可写标记)。"""
+    access = calendar_access(session, user)
+    return {
+        "access": access,
+        "calendar_options": [
+            {
+                "id": calendar.id,
+                "name": calendar.name,
+                "kind": calendar.kind,
+                "color": calendar.color,
+                "role": access.role_for(calendar.id),
+                "can_write": access.can_write(calendar.id),
+            }
+            for calendar in access.calendars
+        ],
+        "default_calendar_id": access.default_write_calendar_id(),
+        "can_write_anything": bool(access.writable_calendars),
+    }
+
+
+FEED_PLACEHOLDER_TEXT = (
+    "此地址不再提供日历。请使用属于你自己的订阅地址"
+    "(形如 /calendar/sisi_feed_xxxx.ics),可在日历应用里查看,或向家庭管理员索取。\n"
+)
+
+
+def public_root(request: Request) -> Response:
+    """公开前缀本身(`/calendar`)对订阅端明确回 404 纯文本。
+
+    无令牌地址不再提供日历:订阅端如果把 `/calendar` 存成日历地址,拿到的应该是一句
+    看得懂的纯文本,而不是被 303 带到登录页(那会被存成一个 HTML「日历」)。
+
+    浏览器(明确要 `text/html`)则照常送到管理界面:家里人手动输错地址时不该看到一段
+    给机器看的话。日历客户端一般发 `*/*` 或 `text/calendar`,走 404 分支。
+    """
+    if "text/html" in request.headers.get("accept", ""):
+        return RedirectResponse(urls.url("/admin"), status_code=303)
+    return Response(
+        content=FEED_PLACEHOLDER_TEXT,
+        status_code=404,
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/", include_in_schema=False)
-def root() -> RedirectResponse:
-    return RedirectResponse("/admin", status_code=303)
+def root(request: Request) -> Response:
+    """裸根路径跳管理页;公开前缀本身交给 `public_root()`。"""
+    prefix = urls.current_prefix()
+    if prefix and request.url.path.rstrip("/") == prefix:
+        return public_root(request)
+    return RedirectResponse(urls.url("/admin"), status_code=303)
 
 
 @router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 def calendar_page(
     request: Request,
-    admin: AdminDep,
+    current: UserDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
     context = _base_context(request, session, settings, active="calendar")
+    full = overview(session, settings=settings)
+    if current.is_admin:
+        sync_state: dict[str, object] = full
+    else:
+        # 成员只看得到 ICS 生成状态,邮件队列与收件人统计属于管理员视图
+        sync_state = {
+            "dirty": full["dirty"],
+            "version": full["version"],
+            "size_bytes": full["size_bytes"],
+            "generated_at": full["generated_at"],
+            "last_error": full["last_error"],
+        }
     context.update(
         {
-            "sync_state": overview(session, settings=settings),
+            "sync_state": sync_state,
             "recurrence_labels": SIMPLE_LABELS,
             "status_options": ["confirmed", "tentative", "cancelled"],
+            **_calendar_context(session, current.user),
         }
     )
     return templates.TemplateResponse(request, "calendar.html", context)
@@ -195,11 +305,16 @@ def _prefill_from_query(request: Request, settings: Settings) -> dict[str, objec
 @router.get("/admin/events/new", response_class=HTMLResponse, include_in_schema=False)
 def event_new_page(
     request: Request,
-    admin: AdminDep,
+    current: UserDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
     prefill = _prefill_from_query(request, settings)
+    calendars = _calendar_context(session, current.user)
+    requested = (request.query_params.get("calendar") or "").strip()
+    selected = requested if calendars["access"].can_write(requested) else calendars[
+        "default_calendar_id"
+    ]
     context = _base_context(request, session, settings, active="calendar")
     context.update(
         {
@@ -208,8 +323,10 @@ def event_new_page(
                 "title": "",
                 "description": "",
                 "location": "",
+                "url": "",
+                "reminders": [],
                 "all_day": prefill["all_day"],
-                "timezone": settings.default_timezone,
+                "timezone": user_timezone(current.user, settings),
                 "status": "confirmed",
                 "start_local": prefill["start_local"],
                 "end_local": prefill["end_local"],
@@ -217,12 +334,18 @@ def event_new_page(
                 "end_date_exclusive": prefill["end_date_exclusive"],
                 "rrule": None,
                 "updated_at": "",
+                "calendar_id": selected,
             },
             "recurrence_simple": "none",
             "recurrence_until": "",
             "mode": "create",
             "recurrence_labels": SIMPLE_LABELS,
-            **_timezone_context(settings.default_timezone),
+            "reminder_options": preset_options([]),
+            "custom_reminders": "",
+            "selected_calendar_id": selected,
+            "event_writable": bool(selected),
+            **calendars,
+            **_timezone_context(user_timezone(current.user, settings)),
         }
     )
     return templates.TemplateResponse(request, "event_form.html", context)
@@ -232,15 +355,17 @@ def event_new_page(
 def event_edit_page(
     event_id: str,
     request: Request,
-    admin: AdminDep,
+    current: UserDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
-    event = get_event(session, event_id)
+    access = calendar_access(session, current.user)
+    event = get_event(session, event_id, calendar_ids=access.viewable_ids())
     if event is None:
-        raise HTTPException(404, "事件不存在或已删除")
-    payload = serialize_event(event)
+        raise HTTPException(404, "事件不存在、已删除,或不属于你可访问的日历")
+    payload = serialize_event(event, access=access)
     simple, until = split_rrule(event.rrule)
+    reminder_minutes = list(payload.get("reminders") or [])
     context = _base_context(request, session, settings, active="calendar")
     context.update(
         {
@@ -249,12 +374,820 @@ def event_edit_page(
             "recurrence_until": until,
             "mode": "edit",
             "recurrence_labels": SIMPLE_LABELS,
+            "reminder_options": preset_options(reminder_minutes),
+            "custom_reminders": custom_reminder_text(reminder_minutes),
+            "selected_calendar_id": event.calendar_id,
+            "event_writable": access.can_write(event.calendar_id),
+            **_calendar_context(session, current.user),
             **_timezone_context(str(payload.get("timezone") or settings.default_timezone)),
         }
     )
     return templates.TemplateResponse(request, "event_form.html", context)
 
 
+# --------------------------------------------------------------------------
+# 我的设置(所有成员)
+# --------------------------------------------------------------------------
+def _me_context(
+    session: Session, settings: Settings, current
+) -> dict[str, object]:
+    """「我的设置」**整页与局部片段共用**的上下文。
+
+    整页 `me.html` 就是 `{% include "partials/me.html" %}`,所以两边必须喂同一套变量:
+    少任何一个,Jinja 只会安静地渲染成空串——页面能打开,但「我的订阅地址」是空的、
+    邮箱验证状态也看不见(这不是假设,`test_all_pages_render_with_strict_undefined` 抓的就是它)。
+    """
+    return {
+        "profile": {
+            "display_name": current.user.display_name or "",
+            "email": current.user.email or "",
+            "color": current.user.color or "",
+            "timezone": current.user.timezone or "",
+        },
+        "feed_tokens": feed_tokens.list_feed_tokens(session, user_id=current.user_id),
+        "verify_state": {
+            "needs_verification": email_verify.needs_email_verification(current.user),
+            "verified_at": current.user.email_verified_at,
+            "email": current.user.email or "",
+        },
+        "fixed_feed_url": feed_tokens.account_subscription_url(
+            session, settings, current.user
+        ),
+        "fixed_token_id": getattr(
+            feed_tokens.fixed_account_token(session, settings, user_id=current.user_id),
+            "id",
+            None,
+        ),
+        # `partials/feeds.html` 的临时地址明文与它用的前缀(只有创建那一次非空)
+        "new_token": None,
+        "subscription_prefix": urls.public_base_url(settings),
+        **_timezone_context(current.user.timezone or ""),
+    }
+
+
+def _me_partial(
+    request: Request,
+    session: Session,
+    settings: Settings,
+    current,
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+    new_token: str | None = None,
+) -> Response:
+    tz_name = user_timezone(current.user, settings)
+    return templates.TemplateResponse(
+        request,
+        "partials/me.html",
+        {
+            "request": request,
+            "csrf_token": current.csrf_token,
+            "current_user": current,
+            "default_timezone": tz_name,
+            "notice": notice,
+            "error": error,
+            **_me_context(session, settings, current),
+            # `partials/feeds.html` 用 `new_token` / `subscription_prefix` 这对名字,
+            # 与 `_feed_partial` 保持一致(名字对不上就只会安静地不显示明文)。
+            "new_token": new_token,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/admin/me", response_class=HTMLResponse, include_in_schema=False)
+def me_page(
+    request: Request,
+    current: UserDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    context = _base_context(request, session, settings, active="me")
+    context.update(_me_context(session, settings, current))
+    context.update(
+        {
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+        }
+    )
+    return templates.TemplateResponse(request, "me.html", context)
+
+
+@router.get("/admin/partials/me", response_class=HTMLResponse, include_in_schema=False)
+def me_partial(
+    request: Request,
+    current: UserDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    return _me_partial(request, session, settings, current)
+
+
+@router.post("/admin/actions/profile", response_class=HTMLResponse, include_in_schema=False)
+def save_profile_action(
+    request: Request,
+    current: CsrfDep,
+    session: Session = Depends(get_db),
+    display_name: str = Form(default=""),
+    email: str = Form(default=""),
+    color: str = Form(default=""),
+    timezone: str = Form(default=""),
+) -> Response:
+    settings = effective_settings(session)
+    previous_email = (current.user.email or "").strip().lower()
+    try:
+        update_profile(
+            session,
+            current.user,
+            display_name=display_name,
+            email=email,
+            color=color,
+            timezone_name=timezone,
+        )
+        session.commit()
+    except AccountError as exc:
+        session.rollback()
+        return _me_partial(
+            request,
+            session,
+            effective_settings(session),
+            current,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    AuditLog.record("profile_save", "success", actor=current.username)
+
+    # 邮箱变了(或第一次填上)就重新验证:旧验证码作废,发一封新验证码过去。
+    # 未验证期间不发日历邮件,也就不会把日程发到一个还没确认归属的地址。
+    new_email = (current.user.email or "").strip().lower()
+    notice = "个人资料已保存,邮件收件范围已同步。"
+    if new_email and new_email != previous_email:
+        email_verify.mark_unverified(session, current.user)
+        code_plain = email_verify.issue_code(session, settings, current.user)
+        sync_user_recipient(session, current.user)
+        session.commit()
+        if email_verify.send_code_mail(settings, current.user, code_plain):
+            AuditLog.record("verify_code_sent", "success", actor=current.username)
+            notice = f"邮箱已更新,验证码已发到 {mask_email(current.user.email)}。"
+        else:
+            notice = "邮箱已更新,但验证码邮件发送失败,请在「邮箱验证」页重新发送。"
+    return _me_partial(request, session, settings, current, notice=notice)
+
+
+@router.post("/admin/actions/password", response_class=HTMLResponse, include_in_schema=False)
+def change_password_action(
+    request: Request,
+    current: CsrfDep,
+    session: Session = Depends(get_db),
+    current_password: str = Form(default=""),
+    new_password: str = Form(default=""),
+    new_password_confirm: str = Form(default=""),
+) -> Response:
+    settings = effective_settings(session)
+    from app.accounts import verify_user_password
+
+    if not verify_user_password(current.user, current_password):
+        AuditLog.record("password_change", "denied", actor=current.username)
+        return _me_partial(
+            request, session, settings, current, error="当前口令不正确。", status_code=401
+        )
+    if new_password != new_password_confirm:
+        return _me_partial(
+            request, session, settings, current, error="两次输入的新口令不一致。", status_code=422
+        )
+    try:
+        set_password(session, current.user, new_password)
+        session.commit()
+    except AccountError as exc:
+        session.rollback()
+        return _me_partial(
+            request,
+            session,
+            effective_settings(session),
+            current,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    AuditLog.record("password_change", "success", actor=current.username)
+    return _me_partial(request, session, settings, current, notice="口令已更新。")
+
+
+# ---- 我自己的订阅令牌 ----
+def _feed_partial(
+    request: Request,
+    session: Session,
+    settings: Settings,
+    current,
+    *,
+    user_id: str | None,
+    template: str,
+    notice: str | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+    new_token: str | None = None,
+) -> Response:
+    rows = feed_tokens.list_feed_tokens(session, user_id=user_id)
+    fixed = None
+    if user_id:
+        fixed = feed_tokens.fixed_account_token(session, settings, user_id=user_id)
+    return templates.TemplateResponse(
+        request,
+        template,
+        {
+            "request": request,
+            "csrf_token": current.csrf_token,
+            "current_user": current,
+            "feed_tokens": rows,
+            "new_token": new_token,
+            # 账号的固定地址:由服务端密钥派生,随时可重新展示,不允许停用或撤销
+            "fixed_token_id": fixed.id if fixed else None,
+            "fixed_feed_url": (
+                urls.subscription_url(
+                    settings, feed_tokens.account_feed_token(settings, user_id)
+                )
+                if user_id
+                else None
+            ),
+            "subscription_prefix": urls.public_base_url(settings),
+            "default_timezone": settings.default_timezone,
+            "notice": notice,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/admin/partials/feeds", response_class=HTMLResponse, include_in_schema=False)
+def my_feeds_partial(
+    request: Request,
+    current: UserDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    return _feed_partial(
+        request,
+        session,
+        settings,
+        current,
+        user_id=current.user_id,
+        template="partials/feeds.html",
+    )
+
+
+@router.post("/admin/partials/feeds", response_class=HTMLResponse, include_in_schema=False)
+def add_my_feed(
+    request: Request,
+    current: CsrfDep,
+    session: Session = Depends(get_db),
+    label: str = Form(default=""),
+) -> Response:
+    settings = effective_settings(session)
+    try:
+        plaintext, row = feed_tokens.create_feed_token(
+            session, user_id=current.user_id, label=label
+        )
+    except SettingValidationError as exc:
+        session.rollback()
+        return _feed_partial(
+            request,
+            session,
+            settings,
+            current,
+            user_id=current.user_id,
+            template="partials/feeds.html",
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("feed_token_add", "success", actor=current.username, detail=row.id)
+    return _feed_partial(
+        request,
+        session,
+        settings,
+        current,
+        user_id=current.user_id,
+        template="partials/feeds.html",
+        new_token=plaintext,
+        notice="订阅地址已创建,明文只显示这一次。",
+    )
+
+
+@router.post(
+    "/admin/partials/feeds/{token_id}/toggle",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def toggle_my_feed(
+    token_id: str,
+    request: Request,
+    current: CsrfDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    row = feed_tokens.get_feed_token(session, token_id)
+    if row is None or row.user_id != current.user_id:
+        return _feed_partial(
+            request,
+            session,
+            settings,
+            current,
+            user_id=current.user_id,
+            template="partials/feeds.html",
+            error="令牌不存在。",
+            status_code=404,
+        )
+    if feed_tokens.is_fixed_account_token(session, settings, row):
+        return _feed_partial(
+            request,
+            session,
+            settings,
+            current,
+            user_id=current.user_id,
+            template="partials/feeds.html",
+            error="这是账号的固定订阅地址,不能停用。需要临时地址请另建一条。",
+            status_code=409,
+        )
+    feed_tokens.set_enabled(session, row, not row.enabled)
+    session.commit()
+    state = "已启用" if row.enabled else "已停用"
+    AuditLog.record("feed_token_toggle", state, actor=current.username, detail=row.id)
+    return _feed_partial(
+        request,
+        session,
+        settings,
+        current,
+        user_id=current.user_id,
+        template="partials/feeds.html",
+        notice=f"{row.label} {state}",
+    )
+
+
+@router.post(
+    "/admin/partials/feeds/{token_id}/delete",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def revoke_my_feed(
+    token_id: str,
+    request: Request,
+    current: CsrfDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    row = feed_tokens.get_feed_token(session, token_id)
+    if row is None or row.user_id != current.user_id:
+        return _feed_partial(
+            request,
+            session,
+            settings,
+            current,
+            user_id=current.user_id,
+            template="partials/feeds.html",
+            error="令牌不存在。",
+            status_code=404,
+        )
+    label = row.label
+    if feed_tokens.is_fixed_account_token(session, settings, row):
+        return _feed_partial(
+            request,
+            session,
+            settings,
+            current,
+            user_id=current.user_id,
+            template="partials/feeds.html",
+            error="这是账号的固定订阅地址,不能撤销(它随时可以重新展示给本人)。",
+            status_code=409,
+        )
+    feed_tokens.delete(session, row)
+    session.commit()
+    AuditLog.record("feed_token_revoke", "success", actor=current.username, detail=token_id)
+    return _feed_partial(
+        request,
+        session,
+        settings,
+        current,
+        user_id=current.user_id,
+        template="partials/feeds.html",
+        notice=f"已撤销:{label}",
+    )
+
+
+# --------------------------------------------------------------------------
+# 成员与邀请码(管理员)
+# --------------------------------------------------------------------------
+def _shared_calendar_entries(session: Session) -> list[dict[str, object]]:
+    """共享日历 + 各自成员角色的列表,成员页与令牌表单共用。"""
+    return [
+        {"calendar": calendar, "roles": calendar_members_map(session, calendar)}
+        for calendar in list_shared_calendars(session)
+    ]
+
+
+def _members_context(session: Session, settings: Settings, *, refresh: bool = True) -> dict:
+    return {
+        "members": list_users(session),
+        "invites": invites.list_invites(session),
+        "shared_calendars": _shared_calendar_entries(session),
+        "member_role_labels": MEMBER_ROLE_LABELS,
+        "role_labels": ROLE_LABELS,
+        "default_timezone": settings.default_timezone,
+        # 邀请链接的固定前半段:明文只在创建那一次出现,列表里只能提示这个形状
+        "invite_base_url": f"{urls.public_base_url(settings)}/register?code=",
+        "public_base_url": urls.public_base_url(settings),
+        # 一次性明文(邀请链接 / 重置口令)默认不存在——整页与片段必须喂同一套变量,
+        # 否则 Jinja 会把缺失的名字安静地渲染成空串(整页 /admin/members 就是经 include 渲染的)
+        "new_invite": None,
+        "new_invite_url": None,
+        "new_password": None,
+        "reset_username": None,
+    }
+
+
+def _members_partial(
+    request: Request,
+    session: Session,
+    settings: Settings,
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+    new_invite: str | None = None,
+    new_invite_url: str | None = None,
+    new_password: str | None = None,
+    reset_username: str | None = None,
+) -> Response:
+    context = {
+        "request": request,
+        "csrf_token": _csrf_of(request, session),
+        # 片段模板里要用它标出「这是你自己」;整页版本由 `_base_context` 提供同一个键
+        "current_user": optional_user(request, session),
+        "notice": notice,
+        "error": error,
+        **_members_context(session, settings),
+        # 一次性明文必须在展开模板默认值**之后**写,否则会被默认的 None 覆盖掉
+        "new_invite": new_invite,
+        "new_invite_url": new_invite_url,
+        "new_password": new_password,
+        "reset_username": reset_username,
+    }
+    return templates.TemplateResponse(
+        request, "partials/members.html", context, status_code=status_code
+    )
+
+
+@router.get("/admin/members", response_class=HTMLResponse, include_in_schema=False)
+def members_page(
+    request: Request,
+    admin: AdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    context = _base_context(request, session, settings, active="members")
+    context.update(
+        {
+            "notice": request.query_params.get("notice"),
+            "error": request.query_params.get("error"),
+            **_members_context(session, settings),
+        }
+    )
+    return templates.TemplateResponse(request, "members.html", context)
+
+
+@router.get("/admin/partials/members", response_class=HTMLResponse, include_in_schema=False)
+def members_partial(
+    request: Request,
+    admin: AdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    return _members_partial(request, session, settings)
+
+
+@router.get("/admin/partials/invites", response_class=HTMLResponse, include_in_schema=False)
+def invites_partial(
+    request: Request,
+    admin: AdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    return _members_partial(request, session, settings)
+
+
+@router.post("/admin/partials/invites", response_class=HTMLResponse, include_in_schema=False)
+def create_invite_action(
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+    label: str = Form(default=""),
+    max_uses: str = Form(default="1"),
+    valid_days: str = Form(default="0"),
+) -> Response:
+    settings = effective_settings(session)
+    expires_at = None
+    try:
+        days = int(valid_days or 0)
+    except ValueError:
+        session.rollback()
+        return _members_partial(
+            request, session, settings, error="有效天数必须是整数。", status_code=422
+        )
+    if days > 0:
+        expires_at = utcnow() + timedelta(days=days)
+    try:
+        plaintext, row = invites.create_invite(
+            session,
+            label=label,
+            max_uses=max_uses,
+            expires_at=expires_at,
+            created_by_user_id=admin.user_id,
+        )
+    except SettingValidationError as exc:
+        session.rollback()
+        return _members_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("invite_create", "success", actor=admin.username, detail=row.id)
+    return _members_partial(
+        request,
+        session,
+        settings,
+        new_invite=plaintext,
+        new_invite_url=urls.invite_url(settings, plaintext),
+        notice=f"邀请码「{row.label}」已创建,复制下面的邀请链接发给家人即可。",
+    )
+
+
+@router.post(
+    "/admin/partials/invites/{invite_id}/toggle",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def toggle_invite_action(
+    invite_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    row = invites.get_invite(session, invite_id)
+    if row is None:
+        return _members_partial(
+            request, session, settings, error="邀请码不存在。", status_code=404
+        )
+    invites.set_enabled(session, row, not row.enabled)
+    session.commit()
+    state = "已启用" if row.enabled else "已停用"
+    AuditLog.record("invite_toggle", state, actor=admin.username, detail=row.id)
+    return _members_partial(request, session, settings, notice=f"{row.label} {state}")
+
+
+@router.post(
+    "/admin/partials/invites/{invite_id}/delete",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def delete_invite_action(
+    invite_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    row = invites.get_invite(session, invite_id)
+    if row is None:
+        return _members_partial(
+            request, session, settings, error="邀请码不存在。", status_code=404
+        )
+    label = row.label
+    invites.delete(session, row)
+    session.commit()
+    AuditLog.record("invite_delete", "success", actor=admin.username, detail=invite_id)
+    return _members_partial(request, session, settings, notice=f"已删除邀请码:{label}")
+
+
+@router.post(
+    "/admin/partials/members/{user_id}/toggle",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def toggle_member_action(
+    user_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    user = get_user(session, user_id)
+    if user is None:
+        return _members_partial(
+            request, session, settings, error="账号不存在。", status_code=404
+        )
+    if user.id == admin.user_id:
+        return _members_partial(
+            request, session, settings, error="不能停用当前登录的管理员账号。", status_code=409
+        )
+    set_user_enabled(session, user, not user.enabled)
+    session.commit()
+    state = "已启用" if user.enabled else "已停用"
+    AuditLog.record("member_toggle", state, actor=admin.username, detail=user.username)
+    return _members_partial(request, session, settings, notice=f"{user.username} {state}")
+
+
+@router.post(
+    "/admin/partials/members/{user_id}/reset",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def reset_member_password_action(
+    user_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    user = get_user(session, user_id)
+    if user is None:
+        return _members_partial(
+            request, session, settings, error="账号不存在。", status_code=404
+        )
+    temporary = secrets.token_urlsafe(9)
+    set_password(session, user, temporary, must_change=True)
+    session.commit()
+    AuditLog.record("member_reset_password", "success", actor=admin.username, detail=user.username)
+    return _members_partial(
+        request,
+        session,
+        settings,
+        new_password=temporary,
+        reset_username=user.username,
+        notice=f"已重置 {user.username} 的口令,明文只显示这一次。",
+    )
+
+
+@router.post(
+    "/admin/partials/members/{user_id}/role",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def set_member_role_action(
+    user_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+    role: str = Form(default="member"),
+) -> Response:
+    settings = effective_settings(session)
+    user = get_user(session, user_id)
+    if user is None:
+        return _members_partial(
+            request, session, settings, error="账号不存在。", status_code=404
+        )
+    if user.id == admin.user_id and role != "admin":
+        return _members_partial(
+            request, session, settings, error="不能取消当前登录管理员的权限。", status_code=409
+        )
+    try:
+        set_user_role(session, user, role)
+    except AccountError as exc:
+        session.rollback()
+        return _members_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("member_role", role, actor=admin.username, detail=user.username)
+    return _members_partial(
+        request, session, settings, notice=f"{user.username} 现在是{ROLE_LABELS.get(role, role)}"
+    )
+
+
+@router.post(
+    "/admin/partials/members/{user_id}/delete",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def delete_member_action(
+    user_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    user = get_user(session, user_id)
+    if user is None:
+        return _members_partial(
+            request, session, settings, error="账号不存在。", status_code=404
+        )
+    if user.id == admin.user_id:
+        return _members_partial(
+            request, session, settings, error="不能删除当前登录的账号。", status_code=409
+        )
+    if user.role == "admin" and len([u for u in list_users(session) if u.is_admin]) <= 1:
+        return _members_partial(
+            request, session, settings, error="至少需要保留一个管理员。", status_code=409
+        )
+    username = user.username
+    delete_user(session, user)
+    session.commit()
+    AuditLog.record("member_delete", "success", actor=admin.username, detail=username)
+    return _members_partial(request, session, settings, notice=f"已删除账号:{username}")
+
+
+@router.post(
+    "/admin/partials/members/{user_id}/calendar-role",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def set_calendar_role_action(
+    user_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+    calendar_id: str = Form(default=""),
+    role: str = Form(default="viewer"),
+) -> Response:
+    settings = effective_settings(session)
+    user = get_user(session, user_id)
+    if user is None:
+        return _members_partial(
+            request, session, settings, error="账号不存在。", status_code=404
+        )
+    calendar = next(
+        (item for item in list_shared_calendars(session) if item.id == calendar_id), None
+    )
+    if calendar is None:
+        return _members_partial(
+            request, session, settings, error="共享日历不存在。", status_code=404
+        )
+    try:
+        set_membership(session, calendar, user, role)
+    except AccountError as exc:
+        session.rollback()
+        return _members_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record(
+        "calendar_role", role, actor=admin.username, detail=f"{user.username}@{calendar.name}"
+    )
+    return _members_partial(
+        request,
+        session,
+        settings,
+        notice=f"{user.username} 在「{calendar.name}」的权限:{MEMBER_ROLE_LABELS.get(role, role)}",
+    )
+
+
+@router.post(
+    "/admin/partials/shared-calendars", response_class=HTMLResponse, include_in_schema=False
+)
+def create_shared_calendar_action(
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+    name: str = Form(default=""),
+    color: str = Form(default=""),
+) -> Response:
+    settings = effective_settings(session)
+    try:
+        calendar = create_shared_calendar(
+            session, name=name, color=color or None, creator=admin.user
+        )
+    except AccountError as exc:
+        session.rollback()
+        return _members_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("shared_calendar_create", "success", actor=admin.username, detail=calendar.id)
+    return _members_partial(
+        request,
+        session,
+        settings,
+        notice=f"已创建共享日历「{calendar.name}」,新成员默认只读,可在下表调整权限。",
+    )
+
+
+# --------------------------------------------------------------------------
+# 全局设置与同步(管理员)
+# --------------------------------------------------------------------------
 @router.get("/admin/settings", response_class=HTMLResponse, include_in_schema=False)
 def settings_page(
     request: Request,
@@ -269,7 +1202,17 @@ def settings_page(
             "overrides": overrides,
             "recipients": _recipients(session),
             "tokens": token_store.list_tokens(session),
+            "family_feed_tokens": feed_tokens.list_feed_tokens(session, user_id=None),
+            "users": list_users(session),
+            "shared_calendars": _shared_calendar_entries(session),
+            "default_owner": owner_user(session),
+            # `partials/family_feeds.html` 里的循环变量名叫 `feed_tokens`(与整页同键)
+            "feed_tokens": feed_tokens.list_feed_tokens(session, user_id=None),
             **_timezone_context(overrides.get("default_timezone", settings.default_timezone)),
+            # 一次性明文(家庭订阅令牌 / 远程接入令牌)默认不存在:
+            # 整页 settings.html 是经 include 渲染这些片段的,变量名必须齐全
+            "new_token": None,
+            "subscription_prefix": urls.public_base_url(settings),
             "smtp": {
                 "host": settings.smtp_host or "",
                 "port": settings.smtp_port,
@@ -308,11 +1251,16 @@ def sync_page(
 
 
 # --------------------------------------------------------------------------
-# HTMX 局部片段:同步人员
+# HTMX 局部片段:邮件收件人
 # --------------------------------------------------------------------------
 def _recipient_partial(
-    request: Request, session: Session, settings: Settings, *, notice: str | None = None,
-    error: str | None = None, status_code: int = 200,
+    request: Request,
+    session: Session,
+    settings: Settings,
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+    status_code: int = 200,
 ) -> Response:
     return templates.TemplateResponse(
         request,
@@ -320,20 +1268,15 @@ def _recipient_partial(
         {
             "request": request,
             "recipients": _recipients(session),
-            "csrf_token": _csrf_of(request),
+            "users": list_users(session),
+            "csrf_token": _csrf_of(request, session),
+            "default_timezone": settings.default_timezone,
             "notice": notice,
             "error": error,
             "mail_configured": settings.mail_configured,
         },
         status_code=status_code,
     )
-
-
-def _csrf_of(request: Request) -> str:
-    from app.deps import optional_admin
-
-    admin = optional_admin(request)
-    return admin.csrf_token if admin else ""
 
 
 @router.get("/admin/partials/recipients", response_class=HTMLResponse, include_in_schema=False)
@@ -349,7 +1292,7 @@ def recipients_partial(
 @router.post("/admin/partials/recipients", response_class=HTMLResponse, include_in_schema=False)
 def add_recipient(
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     email: str = Form(default=""),
     display_name: str = Form(default=""),
@@ -362,7 +1305,7 @@ def add_recipient(
             request,
             session,
             settings,
-            error="请先勾选确认:该人员将收到包含全部日程的完整日历。",
+            error="请先勾选确认:外部邮箱会收到家庭共享日历(不含任何人的私人日程)。",
             status_code=422,
         )
     if not normalized or "@" not in normalized:
@@ -382,14 +1325,20 @@ def add_recipient(
             email=normalized,
             display_name=display_name.strip() or None,
             enabled=True,
+            user_id=None,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
     )
     session.commit()
-    AuditLog.record("recipient_add", "success", actor=admin.username, detail=mask_email(normalized))
+    AuditLog.record(
+        "recipient_add", "success", actor=admin.username, detail=mask_email(normalized)
+    )
     return _recipient_partial(
-        request, session, settings, notice=f"已添加 {mask_email(normalized)}"
+        request,
+        session,
+        settings,
+        notice=f"已添加外部收件人 {mask_email(normalized)}(家庭共享范围)",
     )
 
 
@@ -401,7 +1350,7 @@ def add_recipient(
 def toggle_recipient(
     recipient_id: str,
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     acknowledge: str = Form(default=""),
 ) -> Response:
@@ -409,14 +1358,14 @@ def toggle_recipient(
     recipient = session.get(SyncRecipient, recipient_id)
     if recipient is None:
         return _recipient_partial(
-            request, session, settings, error="同步人员不存在。", status_code=404
+            request, session, settings, error="收件人不存在。", status_code=404
         )
     if not recipient.enabled and not acknowledge:
         return _recipient_partial(
             request,
             session,
             settings,
-            error="启用前请确认:该人员将收到包含全部日程的完整日历。",
+            error="启用前请确认:该邮箱将收到对应范围的日历快照。",
             status_code=422,
         )
     recipient.enabled = not recipient.enabled
@@ -439,14 +1388,14 @@ def toggle_recipient(
 def remove_recipient(
     recipient_id: str,
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
     recipient = session.get(SyncRecipient, recipient_id)
     if recipient is None:
         return _recipient_partial(
-            request, session, settings, error="同步人员不存在。", status_code=404
+            request, session, settings, error="收件人不存在。", status_code=404
         )
     masked = mask_email(recipient.email)
     session.delete(recipient)
@@ -456,7 +1405,7 @@ def remove_recipient(
 
 
 # --------------------------------------------------------------------------
-# HTMX 局部片段:远程接入令牌
+# HTMX 局部片段:远程接入令牌(管理员)
 # --------------------------------------------------------------------------
 def _token_partial(
     request: Request,
@@ -474,7 +1423,10 @@ def _token_partial(
         {
             "request": request,
             "tokens": token_store.list_tokens(session),
-            "csrf_token": _csrf_of(request),
+            "users": list_users(session),
+            "shared_calendars": _shared_calendar_entries(session),
+            "default_owner": owner_user(session),
+            "csrf_token": _csrf_of(request, session),
             "default_timezone": settings.default_timezone,
             "new_token": new_token,
             "notice": notice,
@@ -497,9 +1449,11 @@ def tokens_partial(
 @router.post("/admin/partials/tokens", response_class=HTMLResponse, include_in_schema=False)
 def add_token(
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     label: str = Form(default=""),
+    user_id: str = Form(default=""),
+    calendar_id: str = Form(default=""),
     acknowledge: str = Form(default=""),
 ) -> Response:
     settings = effective_settings(session)
@@ -511,8 +1465,34 @@ def add_token(
             error="请先勾选确认:该令牌持有者可远程新建日程并触发邮件同步。",
             status_code=422,
         )
+    owner = owner_user(session)
+    target_user_id = user_id.strip() or (owner.id if owner else None)
+    if target_user_id is None:
+        return _token_partial(
+            request, session, settings, error="没有可归属的账号。", status_code=409
+        )
+    target_user = get_user(session, target_user_id)
+    if target_user is None:
+        return _token_partial(
+            request, session, settings, error="归属账号不存在。", status_code=404
+        )
+    if calendar_id.strip():
+        access = calendar_access(session, target_user)
+        if not access.can_write(calendar_id.strip()):
+            return _token_partial(
+                request,
+                session,
+                settings,
+                error="该账号对所选日历没有写权限,请换一个日历或提升权限。",
+                status_code=422,
+            )
     try:
-        plaintext, row = token_store.create_token(session, label)
+        plaintext, row = token_store.create_token(
+            session,
+            label,
+            user_id=target_user_id,
+            calendar_id=calendar_id.strip() or None,
+        )
     except SettingValidationError as exc:
         session.rollback()
         return _token_partial(
@@ -529,7 +1509,7 @@ def add_token(
         session,
         settings,
         new_token=plaintext,
-        notice=f"令牌已创建(指纹 {row.token_hash[:16]})",
+        notice=f"令牌已创建(指纹 {row.token_hash[:16]},归属 {target_user.username})",
     )
 
 
@@ -539,7 +1519,7 @@ def add_token(
 def rename_token_route(
     token_id: str,
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     label: str = Form(default=""),
 ) -> Response:
@@ -573,7 +1553,7 @@ def rename_token_route(
 def toggle_token(
     token_id: str,
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
@@ -597,7 +1577,7 @@ def toggle_token(
 def revoke_token(
     token_id: str,
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
@@ -614,12 +1594,150 @@ def revoke_token(
 
 
 # --------------------------------------------------------------------------
-# HTMX 局部片段:日历设置与同步操作
+# HTMX 局部片段:家庭订阅地址(管理员)
 # --------------------------------------------------------------------------
+def _family_feed_partial(
+    request: Request,
+    session: Session,
+    settings: Settings,
+    *,
+    notice: str | None = None,
+    error: str | None = None,
+    status_code: int = 200,
+    new_token: str | None = None,
+) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "partials/family_feeds.html",
+        {
+            "request": request,
+            "feed_tokens": feed_tokens.list_feed_tokens(session, user_id=None),
+            "new_token": new_token,
+            "csrf_token": _csrf_of(request, session),
+            "subscription_prefix": urls.public_base_url(settings),
+            "default_timezone": settings.default_timezone,
+            "notice": notice,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
+@router.get("/admin/partials/family-feeds", response_class=HTMLResponse, include_in_schema=False)
+def family_feeds_partial(
+    request: Request,
+    admin: AdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    return _family_feed_partial(request, session, settings)
+
+
+@router.post("/admin/partials/family-feeds", response_class=HTMLResponse, include_in_schema=False)
+def add_family_feed(
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+    label: str = Form(default="家庭共享日历"),
+) -> Response:
+    settings = effective_settings(session)
+    try:
+        plaintext, row = feed_tokens.create_feed_token(session, user_id=None, label=label)
+    except SettingValidationError as exc:
+        session.rollback()
+        return _family_feed_partial(
+            request,
+            session,
+            settings,
+            error="保存失败:" + ";".join(exc.fields.values()),
+            status_code=422,
+        )
+    session.commit()
+    AuditLog.record("family_feed_add", "success", actor=admin.username, detail=row.id)
+    return _family_feed_partial(
+        request,
+        session,
+        settings,
+        new_token=plaintext,
+        notice="家庭订阅地址已创建,明文只显示这一次。",
+    )
+
+
+@router.post(
+    "/admin/partials/family-feeds/{token_id}/toggle",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def toggle_family_feed(
+    token_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    row = feed_tokens.get_feed_token(session, token_id)
+    if row is None or row.user_id is not None:
+        return _family_feed_partial(
+            request, session, settings, error="令牌不存在。", status_code=404
+        )
+    feed_tokens.set_enabled(session, row, not row.enabled)
+    session.commit()
+    state = "已启用" if row.enabled else "已停用"
+    AuditLog.record("family_feed_toggle", state, actor=admin.username, detail=row.id)
+    return _family_feed_partial(request, session, settings, notice=f"{row.label} {state}")
+
+
+@router.post(
+    "/admin/partials/family-feeds/{token_id}/delete",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def revoke_family_feed(
+    token_id: str,
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    settings = effective_settings(session)
+    row = feed_tokens.get_feed_token(session, token_id)
+    if row is None or row.user_id is not None:
+        return _family_feed_partial(
+            request, session, settings, error="令牌不存在。", status_code=404
+        )
+    label = row.label
+    feed_tokens.delete(session, row)
+    session.commit()
+    AuditLog.record("family_feed_revoke", "success", actor=admin.username, detail=token_id)
+    return _family_feed_partial(request, session, settings, notice=f"已撤销:{label}")
+
+
+# --------------------------------------------------------------------------
+# HTMX 局部片段:日历设置与同步操作(管理员)
+# --------------------------------------------------------------------------
+def _settings_form_response(
+    request: Request, session: Session, settings: Settings, admin, *,
+    notice: str | None, error: str | None, status_code: int = 200,
+) -> Response:
+    return templates.TemplateResponse(
+        request,
+        "partials/settings_form.html",
+        {
+            "request": request,
+            "csrf_token": admin.csrf_token,
+            "settings": settings,
+            "overrides": load_overrides(session),
+            **_timezone_context(settings.default_timezone),
+            "notice": notice,
+            "error": error,
+        },
+        status_code=status_code,
+    )
+
+
 @router.post("/admin/actions/settings", response_class=HTMLResponse, include_in_schema=False)
 def save_settings_action(
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     calendar_name: str = Form(default=""),
     default_timezone: str = Form(default=""),
@@ -639,43 +1757,26 @@ def save_settings_action(
         session.commit()
     except SettingValidationError as exc:
         session.rollback()
-        refreshed = effective_settings(session)
-        return templates.TemplateResponse(
+        return _settings_form_response(
             request,
-            "partials/settings_form.html",
-            {
-                "request": request,
-                "csrf_token": admin.csrf_token,
-                "settings": refreshed,
-                "overrides": load_overrides(session),
-                **_timezone_context(refreshed.default_timezone),
-                "notice": None,
-                "error": "保存失败:" + ";".join(exc.fields.values()),
-            },
+            session,
+            effective_settings(session),
+            admin,
+            notice=None,
+            error="保存失败:" + ";".join(exc.fields.values()),
             status_code=422,
         )
 
-    refreshed = effective_settings(session)
     AuditLog.record("settings_save", "success", actor=admin.username)
-    return templates.TemplateResponse(
-        request,
-        "partials/settings_form.html",
-        {
-            "request": request,
-            "csrf_token": admin.csrf_token,
-            "settings": refreshed,
-            "overrides": load_overrides(session),
-            **_timezone_context(refreshed.default_timezone),
-            "notice": "设置已保存。",
-            "error": None,
-        },
+    return _settings_form_response(
+        request, session, effective_settings(session), admin, notice="设置已保存。", error=None
     )
 
 
 @router.post("/admin/actions/mail-test", response_class=HTMLResponse, include_in_schema=False)
 def mail_test_action(
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     to: str = Form(default=""),
 ) -> Response:
@@ -724,7 +1825,7 @@ def mail_test_action(
 @router.post("/admin/actions/regenerate", response_class=HTMLResponse, include_in_schema=False)
 def regenerate_action(
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
@@ -757,7 +1858,7 @@ def regenerate_action(
 @router.post("/admin/actions/send-latest", response_class=HTMLResponse, include_in_schema=False)
 def send_latest_action(
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
     confirm: str = Form(default=""),
 ) -> Response:
@@ -767,7 +1868,7 @@ def send_latest_action(
             request,
             session,
             settings,
-            error="请先二次确认,再向全部启用人员发送完整日历。",
+            error="请先二次确认,再向全部启用收件人发送日历快照(每人只收到自己范围里尚未结束的日程)。",
             status_code=422,
         )
     if not settings.mail_configured:
@@ -811,7 +1912,7 @@ def send_latest_action(
 def retry_action(
     delivery_id: str,
     request: Request,
-    admin: CsrfDep,
+    admin: CsrfAdminDep,
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
@@ -864,7 +1965,7 @@ def _sync_partial(
         "partials/sync_status.html",
         {
             "request": request,
-            "csrf_token": _csrf_of(request),
+            "csrf_token": _csrf_of(request, session),
             "sync_state": overview(session, settings=settings),
             "deliveries": _deliveries(session),
             "status_labels": SYNC_STATE_LABELS,
@@ -895,19 +1996,8 @@ def settings_form_partial(
     session: Session = Depends(get_db),
 ) -> Response:
     settings = effective_settings(session)
-    overrides = load_overrides(session)
-    return templates.TemplateResponse(
-        request,
-        "partials/settings_form.html",
-        {
-            "request": request,
-            "csrf_token": admin.csrf_token,
-            "settings": settings,
-            "overrides": overrides,
-            **_timezone_context(overrides.get("default_timezone", settings.default_timezone)),
-            "notice": None,
-            "error": None,
-        },
+    return _settings_form_response(
+        request, session, settings, admin, notice=None, error=None
     )
 
 
@@ -917,5 +2007,7 @@ __all__ = [
     "timezone_groups",
     "SYNC_STATE_LABELS",
     "CHANGE_LABELS",
+    "MEMBER_ROLE_LABELS",
+    "ROLE_LABELS",
     "get_state",
 ]
