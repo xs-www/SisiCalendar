@@ -1,5 +1,62 @@
 # TODO
 
+## 本轮已完成(2026-10-12 第五轮:同步邮箱收敛到外部邮箱 + 只通知「看得见的人」)
+
+> 文档编号对照:本仓库的《开发文档》与《验收测试记录》里没有单独的「界面可用性」轮,
+> 所以同一件事在那里记作 **2026-10-12 第四轮**(开发文档 §18.15、验收记录 §3.8),
+> 行文里出现的「第四轮」都是指本轮。
+
+需求(真机反馈):共享日历里日程变动时,**范围内的家人收不到同步邮件**,仍只发给「设置」里
+那几行同步邮箱。要求把设置里的同步邮箱功能**收敛到外部邮箱**,并让「某成员可见日历变动」时
+把这次变更同步给**范围内用户已认证的邮箱**(附上未竟日程的 ICS 副本)。
+
+- [x] **根因**:账号收件人虽然由 `users.email` 派生,却是一行**可被设置页删掉/停用**的普通记录
+      ——`app/routers/pages.py` 的 `remove_recipient` / `toggle_recipient` **没有守卫**
+      (只有 `/api/v1/sync-recipients` 拦了改名/删除);删掉之后又没有任何路径补回来
+      (`ensure_family_setup` 的逐个 `sync_user_recipient` 不会置 `changed`,
+      结尾的 `session.commit()` 因此不执行)。真机库里两位成员都已验证,只剩一行收件人。
+- [x] **账号收件人改为派生 + 自愈**:新增
+      `app/accounts.py::sync_account_recipients(session) -> int`(启用 + 已验证 → 一条**启用**的
+      账号收件人;账号停用 → 该行 `enabled=False`,不删行;返回变化行数供调用方提交);
+      `sync_user_recipient()` 补上「账号启用时把该行恢复成启用」
+- [x] **三个对齐时机**:启动引导、**建发信任务之前**(`ensure_delivery_tasks`)、设置页渲染前
+      ——不再依赖「上一次启动是否修好」
+- [x] **引导修复必须落库**:`ensure_family_setup` 结尾改为**无条件 `session.commit()`**
+      (逐项修复各自 `flush`,只看 `changed` 标记会漏判)
+- [x] **设置页只维护外部邮箱**:`_recipients()` 只返回 `user_id IS NULL` 的行;
+      新增只读的「账号邮箱(自动同步)」表(`_account_recipient_entries`);
+      新增 `_guard_external_recipient`,页面上的停用/移除命中账号行 → **409**
+- [x] **接口同步收口**:`PATCH /api/v1/sync-recipients {"enabled": …}` 命中账号行 → **409**
+      (此前只拦改名/删除);要停止某个账号收信,唯一做法是**停用该账号**
+- [x] **只通知看得见这次改动的人**:`publish()` 新增 `changed_calendar_ids`
+      (不给时按 `event.calendar_id` 推断;PATCH 换日历传**新旧两条**);
+      `ensure_delivery_tasks()` 新增 `_scope_calendar_ids()` 求交集,无交集不建任务;
+      手动群发 / CLI 导出 / 后台修复不传 = 发给全部收件人
+- [x] **顺带修掉一个真缺陷**:`PATCH /api/v1/events/{id}` 原先**先搬家再校验乐观锁**,
+      而 `move_event_to_calendar` 会刷新 `updated_at` → 带 `expected_updated_at` 的换日历请求
+      必然 **409**;改为先 `update_event` 再搬家
+- [x] **测试**:新增 `tests/test_account_recipient_sync.py` **14 项**;适配既有用例
+      (`test_mail.py::test_agent_submitted_offset_reaches_the_mail_body`、
+      `test_mail_actor.py` 4 条改为把事件建在家庭共享日历里);
+      全量 **450** 项通过(436 → 450),`ruff check app tests migrations` 干净
+- [x] **文档**:AGENTS.md 不变量 17 改写、新增不变量 **24/25**;
+      `docs/static/` 更新 `app-accounts`/`app-mailqueue`/`app-sync-service`/`app-bootstrap`/
+      `app-models`/`app-routers-pages`/`app-routers-api-events`/`app-routers-api-agent`/
+      `app-routers-api-recipients`/`templates`;README/开发文档(§6.5、§18.6、§18.7、新增 §18.15)/
+      部署运维(§5 添加收件人、§6 权限表、§6.1 故障排查、§9.3 订阅与邮件范围)/
+      验收记录(新增 §3.8)/todo.md 同步
+- [x] **真机部署(2026-10-13 已完成)**:`docker compose up -d --build` 重建镜像并替换容器
+      (此前跑的是 2026-10-12 01:33 的旧镜像,本轮改动都还没上机);部署前先在容器内
+      `app.cli backup` 留了一份 `/data/backups/calendar-20261013-013350.db`;
+      启动日志显示 `0007_email_verification -> 0008_delivery_actor` 迁移成功、无 `Traceback`、
+      容器 `Up (healthy)`;`/healthz` 200、`/calendar/login` 200、`/calendar` 404 纯文本;
+      **真机库 `sync_recipients` 从 1 行变 2 行**——那位成员的账号收件人被自动建出并提交;
+      回滚事务探针确认:共享日历变动通知 2 人、管理员私人日历变动 0 人、手动群发 2 人(不写库不发信)
+- [ ] **还没真的发过一封邮件**:以上都是「范围判定正确」的验证,实发链路(真 SMTP + 真收件箱)
+      没触发。`.env` 里只有 `ADMIN_PASSWORD_HASH`,没法登录点「向当前人员发送最新版」;
+      建议管理员在 `/admin/sync` 手动跑一次,或改一条共享日程后到 `/admin/sync` 看队列里
+      是否出现两人各一条任务
+
 ## 上一轮已完成(2026-09-29)
 
 - [x] 邮件队列(`/admin/sync`)显示**操作时间**(任务创建时刻)与**发送时间**,时间按日历默认时区展示
@@ -228,7 +285,63 @@
   **不绑定日历**,所以请求体不带 `calendar_id` 时日程落进**首位管理员的个人日历**;
   想让快捷指令直接写进「家庭共享日历」,建一枚平台令牌并把「默认日历」选成它即可
 
+## 本轮已完成(2026-10-12 第四轮:同步邮件标明「发起人」)
+
+真机反馈:同步邮件只说「本次操作:新增日程」,**收信的家人看不出是谁改的**。
+
+- [x] **邮件正文新增「发起人」一行**:`app/mailqueue.py::_body_for` 在「本次操作:…」
+      之后写 `发起人:<账号显示名>`(显示名优先,没有显示名用用户名)
+- [x] **只标具体日程**:只对「新增/修改/删除日程」写这一行;**手动同步不写**
+      (「重新生成 ICS」「向当前人员发送最新版」是管理员主动群发),也**从不**凭空写「未记录」
+- [x] **语义定死:发起人是「谁在操作」,不是「事件是谁建的」**。
+      `app/sync_service.py::publish` 新增 `actor_user_id` / `actor_label` 并**不读**
+      `event.created_by_user_id`(那会把别人的改动记到创建人头上);五个调用点各自显式传入:
+      `api_events` ×3 = 当前登录者、`api_agent` = 令牌绑定账号、`api_sync`/`pages` 手动动作 =
+      当前管理员;CLI 与后台 `repair_if_needed` 不传(正文写「未记录」)
+- [x] **名字取值**:新增 `app/mailqueue.py::_actor_name` —— `actor_user_id` **现查**账号
+      (改名立刻生效)→ 查不到退回 `actor_label` 快照 → 都没有写「未记录」
+- [x] **发起人在建任务那一刻固化**:同版本重试沿用任务记录,不会改成「现在登录的人」
+- [x] **迁移 `0008_delivery_actor`**:`mail_deliveries` 加 `actor_user_id`(无外键)与
+      `actor_label`(显示名快照);**只加列、不回填**,升级前的历史任务显示「未记录」
+- [x] **删账号不留悬空引用**:`app/accounts.py::delete_user` 显式把 `actor_user_id` 置空、
+      **保留 `actor_label` 快照**(不变量 20 的同一理由:升级库的加列没有外键约束)
+- [x] **管理面可见**:`/admin/sync` 队列表格在「类型」后新增「发起人」列(历史任务显示 `—`,
+      手动同步也记录操作者备查);`GET /api/v1/mail-deliveries` 每项新增 `actor_label`
+      (`app/schemas.py::DeliveryRead`)
+- [x] **测试**:新增 `tests/test_mail_actor.py` **10 项**(覆盖增删改三种操作、成员改管理员的
+      事件时发起人是成员、Agent 令牌、手动同步不写、历史任务「未记录」、删账号后仍说得清、
+      改名立刻生效、队列页面与 API 可见、历史任务渲染不出现 `None`);
+      全量 **436** 项通过(426 → 436),`ruff check app tests migrations` 干净
+- [x] **文档**:`docs/static/` 更新 `app-mailqueue`/`app-sync-service`/`app-routers-api-settings`/
+      `templates`/`app-accounts`,新增 `migrations-0008`;开发文档/部署运维/验收记录(§3.7)/README 同步
+- [x] **真机部署与验证(2026-10-13 已完成)**:随第五轮的镜像重建一起上机
+      (`docker compose up -d --build`,镜像构建 01:33:59Z、容器启动 01:34:01Z,见本文件顶部第五轮
+      的「真机部署」条);容器内 69 个运行时文件与工作区**逐字节一致**,
+      `alembic_version = 0008_delivery_actor`,队列表格已带「发起人」列。
+      **端到端**:用户以思思在 01:42:29 新建日程「吃饭」→ 两条任务的 `actor_label` 都是「思思」,
+      两封邮件随后 `status=sent`(两位家人各一封)。另在生产库**副本**上用已部署代码跑了 12 项
+      检查(主路径 / 手动同步不写 / 删账号靠快照 / 历史任务)全部通过,真实库未被改动。
+      详见 `docs/验收测试记录.md` §3.7
+- [ ] **真机复现差异点(未做)**:上面验证的是「账号本人建日程」;「成员改**管理员建的**日程、
+      邮件写改动的那个成员」这条差异点仍只有自动化覆盖
+      (`test_mail_actor.py::test_member_edit_mail_names_the_member_display_name`),未在真机人工复现
+
 ## 待办
+
+### 待实施:GitHub Actions 自动构建镜像 → GHCR(2026-10-14 起草,**未开工**)
+
+计划落盘在 [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md):`master` 提交后由
+Actions 跑 ruff + pytest 门禁,再出 `linux/amd64` + `linux/arm64` 双架构镜像推到
+`ghcr.io/xs-www/sisicalendar`,NAS 侧用新的 `compose.nas.yaml` 直接 `pull` 部署。
+**目前仓库里还没有 `.github/workflows/` 与 `compose.nas.yaml`,也还没改任何代码**;
+细节、验收标准与「不做的事」见该计划文件。
+
+- [ ] 新建 `.github/workflows/docker-publish.yml`(门禁 job + 多架构构建 job)
+- [ ] 新建 `compose.nas.yaml`(纯拉取,服务名仍叫 `calendar`)
+- [ ] README / `docs/部署与运维.md` 补「从 GHCR 拉取镜像部署到 NAS」
+- [ ] `docs/static/ci-docker-publish.md` + 索引登记;`todo.md` 改「已实施」
+- [ ] 首次推送后把 GHCR 包可见性设为 Public(NAS 免登录拉取)
+- [ ] NAS 实测:`Up (healthy)`、`/healthz` 200、`/calendar/login` 200、`/calendar` 404 纯文本
 
 ### 家庭版遗留(按需再做)
 
@@ -242,9 +355,11 @@
       可复用 `calendar_members` 直接把某人的私人日历加第二个成员,但必须先想清楚
       「管理员能不能读」这条边界(当前答案是不能,加成员等于成员自己授权)
 - [x] **真机确认订阅**(2026-10-11 完成,2026-10-12 换成固定地址后需再确认一次,见上一条)
-- [ ] **邮件范围真机确认**:给成员账号填邮箱并**通过验证**后发布一次,确认他只收到自己可见范围的
-      附件、且正文里的订阅地址是**他自己**那条;给外部邮箱(长辈)发布一次,确认附件里没有任何人的
-      私人日程、正文里一条 `sisi_feed_` 地址都没有
+- [ ] **邮件范围真机确认**(2026-10-12 第四轮已把机制改成自动派生 + 按可见范围筛选,
+      待真机复核):成员邮箱验证通过后**不需要**在设置页添加,确认他只收到自己可见范围的附件、
+      且正文里的订阅地址是**他自己**那条;给外部邮箱(长辈)发布一次,确认附件里没有任何人的
+      私人日程、正文里一条 `sisi_feed_` 地址都没有;再确认改动落在管理员私人日历时**不会**
+      打扰外部邮箱
 - [ ] **邀请码闭环实测**:管理员发码 → 成员注册(**填邮箱 + 输验证码**)→ 家长提升为 `editor` →
       他改共享日历 → 确认其他成员收到的是更新后的订阅与邮件
 - [ ] **历史外部收件人的归宿**:单用户版带上来的两个邮箱现在靠 `scope_user_id` 沿用首位管理员的
@@ -297,8 +412,10 @@
 - [ ] **iPhone 真机订阅**:按《部署与运维》3.3 添加订阅,覆盖普通/全天/跨日/重复事件;
   **2026-10-12 起必须用各人自己的固定地址** `/calendar/<自己的令牌>.ics`(旧的 `/calendar` 已失效)
 - [ ] **iOS 快捷指令实测**:用 `timezone=1` 这条新路径建一条日程,确认落库时区为 `Asia/Shanghai`
-- [ ] **容器内页面复核**:邮件队列表格由 8 列增至 10 列,确认窄屏下的横向滚动是否可接受
+- [ ] **容器内页面复核**:邮件队列表格由 8 列增至 **11** 列(2026-10-12 第三轮又加了「发起人」),
+  确认窄屏下的横向滚动是否可接受
 - [ ] **真实 SMTP 发信**:配置真实邮箱后点「向当前人员发送最新版」,核对队列里的操作/发送时间
+  与「发起人」列(手动同步那一行显示操作者,但邮件正文里**不**出现发起人一行)
 - [ ] 主机重启后确认 `docker compose ps` 仍为 `Up (healthy)`
 - [ ] 从第二台设备实测 443 端口不可达
 
@@ -332,8 +449,15 @@
   `/calendar/verify-email`、`/api` 403 `email_not_verified`),也不能成为邮件收件人;首位管理员豁免;
   验证码 6 位 / 30 分钟 / 最多 5 次 / 重发冷却 60 秒;改邮箱立刻打回待验证。验证码与地址明文
   不进日志,库里只有 HMAC 哈希(AGENTS.md 不变量 22)。
-- **邮件范围按收件人区分**:账号收件人 = 本人可见日历 + **他自己**那条固定地址,外部收件人 =
-  家庭共享日历且**一条订阅地址都不给**;旧的并集地址与 `SUBSCRIPTION_URL` 已彻底取消。
+- **邮件范围按收件人区分,而且**账号收件人是派生数据(2026-10-12 第四轮,AGENTS.md 不变量 24/25):
+  `sync_recipients.user_id` 非空的行完全由 `users.email` + `users.enabled` + `email_verified_at`
+  决定,由 `app/accounts.py::sync_account_recipients()` 在**启动引导、建发信任务之前、设置页
+  渲染前**三个时机对齐(启用且已验证 → 一条启用的账号收件人;账号停用 → 该行停用但不删)。
+  设置页与 `/api/v1/sync-recipients` **只维护外部邮箱**,命中账号行的改名/启停/删除一律 409;
+  要停收信只能停用账号。**一次改动只通知「可见范围包含这条日历」的收件人**
+  (`publish(changed_calendar_ids=…)` → `_scope_calendar_ids()` 求交集;换日历传新旧两条;
+  手动群发/CLI/后台修复不传 = 全员)。账号收件人 = 本人可见日历 + **他自己**那条固定地址,
+  外部收件人 = 家庭共享日历且**一条订阅地址都不给**;并集地址与 `SUBSCRIPTION_URL` 已彻底取消。
 - **收件人的身份与范围必须分开**:`sync_recipients.user_id` 是「这行属于哪个账号」的身份标记
   (**每个账号最多一行**),`scope_user_id` 才是收信范围;引导/迁移/`sync_user_recipient` 都不得把
   多个邮箱写进同一个 `user_id`(真机升级时正是这个写法让第二次启动必崩,迁移 `0006_recipient_scope`
