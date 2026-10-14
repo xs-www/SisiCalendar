@@ -366,6 +366,23 @@
 
 ## 待办
 
+### 待决策:Tailnet 自动/半自动配置(2026-10-14 出设计稿)
+
+设计稿:[`docs/Tailnet自动配置方案.md`](docs/Tailnet自动配置方案.md)(**未实施**,等你选边)。
+核心结论:**origin 可以运行时改(免重启),路径前缀不行**(它只在启动时挂载一次);
+`tailscale serve` 是整机配置,容器内只能「生成命令」,要全自动就得换部署形态(sidecar)。
+
+- [ ] **第 1 期(推荐先做)**:设置页可覆盖 `public_base_url` 的 **origin**(路径仍以 env 为唯一来源)
+      + 从请求推导 tailnet 地址的「一键采用」+ 容器内探
+      `host.docker.internal:$HOST_PORT/healthz` 验证宿主端口映射 + 生成端口正确的
+      `tailscale serve` 命令(含先快照)
+- [ ] **第 2 期(可选)**:`scripts/tailscale-serve.ps1/.sh`,在宿主机读 `tailscale status --json`
+      取 `Self.DNSName`,默认 dry-run,显式 `-Apply` 才执行
+- [ ] **第 3 期(可选,看决策)**:开箱管理员体验 —— A1 一次性引导码(推荐)/
+      A2 受限默认口令(必须 opt-in + 仅空库 + 强制改密 + 常驻横幅)/ A3 首个注册者成为管理员
+- [ ] **第 4 期(不建议默认)**:Tailscale sidecar + `TS_SERVE_CONFIG`,把 serve 变成「点一下生效」
+      (代价:多一个 tailnet 节点、auth key、需启用 HTTPS 证书)
+
 ### 家庭版遗留(按需再做)
 
 - [x] **在每台 iPhone 上把订阅地址换成新的固定地址**(2026-10-12 完成):
