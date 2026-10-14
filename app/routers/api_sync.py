@@ -48,6 +48,7 @@ def _recent_deliveries(session: Session, limit: int = 20) -> list[dict[str, obje
             "recipient_id": row.recipient_id,
             "recipient_email": mask_email(row.recipient_email),
             "change_type": row.change_type,
+            "actor_label": row.actor_label,
             "status": row.status,
             "attempt_count": row.attempt_count,
             "next_attempt_at": iso_utc(row.next_attempt_at),
@@ -81,7 +82,13 @@ def regenerate_calendar(
             429,
             error_payload("rate_limited", f"操作过于频繁,请 {retry_after} 秒后再试"),
         )
-    outcome = publish(session, settings=settings, force_new_version=force)
+    outcome = publish(
+        session,
+        settings=settings,
+        force_new_version=force,
+        actor_user_id=admin.user_id,
+        actor_label=admin.label,
+    )
     return {
         "ok": outcome.ok,
         "sync": outcome.as_dict(),
@@ -121,11 +128,19 @@ def send_latest(
             error_payload("rate_limited", f"操作过于频繁,请 {retry_after} 秒后再试"),
         )
 
-    outcome = publish(session, settings=settings)
+    outcome = publish(
+        session, settings=settings, actor_user_id=admin.user_id, actor_label=admin.label
+    )
     if not outcome.ok:
         return {"ok": False, "sync": outcome.as_dict(), "error": outcome.error}
 
-    created = send_latest_to_enabled(session, settings=settings, snapshot_version=outcome.version)
+    created = send_latest_to_enabled(
+        session,
+        settings=settings,
+        snapshot_version=outcome.version,
+        actor_user_id=admin.user_id,
+        actor_label=admin.label,
+    )
     session.commit()
     summary = process_queue(session, settings=settings, limit=50)
     session.commit()

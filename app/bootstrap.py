@@ -68,9 +68,9 @@ def ensure_family_setup(session: Session, settings: Settings) -> None:
         list_users,
         owner_user,
         personal_calendar,
-        sync_user_recipient,
+        sync_account_recipients,
     )
-    from app.feed_tokens import ensure_account_feed_token
+    from app.feed_tokens import ensure_account_feed_token, fixed_account_token
     from app.models import (
         DEFAULT_USER_COLORS,
         ROLE_ADMIN,
@@ -130,10 +130,16 @@ def ensure_family_setup(session: Session, settings: Settings) -> None:
     for user in list_users(session):
         personal_calendar(session, user)
         join_shared_calendars(session, user)
-        sync_user_recipient(session, user)
         # 每个账号都必须有一条**固定**订阅地址(由服务端密钥派生,永不改变)。
         # 建号时已经生成过;这里兜底覆盖「升级上来的老账号」与「建号时没拿到 settings」。
+        if fixed_account_token(session, settings, user_id=user.id) is None:
+            changed = True
         ensure_account_feed_token(session, settings, user)
+
+    # 账号收件人(「范围内用户的已认证邮箱」)由账号资料派生:启用且已验证的账号必须有
+    # 一条启用的收件人记录。设置页只维护外部邮箱,所以这里兜底补回被历史操作删掉/停用的行。
+    if sync_account_recipients(session):
+        changed = True
 
     # 历史事件:升级前它们没有归属日历,全部挂到首位管理员的个人日历
     legacy_events = list(
@@ -178,7 +184,10 @@ def ensure_family_setup(session: Session, settings: Settings) -> None:
 
     if changed:
         mark_dirty(session)
-        session.commit()
+    # 引导里的每一项修复都必须**落库**:逐项修复各自会 flush,靠 `session.new` 之类的
+    # 会话状态判断会漏判(早先只看 `changed` 标记,漏标的修复会被调用方静默回滚)。
+    # 这里统一提交一次;调用方(启动流程)本来就是「跑完即提交」的语义。
+    session.commit()
 
 
 def startup_checks(session: Session, settings: Settings) -> None:

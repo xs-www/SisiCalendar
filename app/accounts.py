@@ -361,7 +361,7 @@ def delete_user(session: Session, user: User) -> None:
     SQLite 的 `batch_alter_table` 加列时不会补外键,升级上来的库里没有这条约束,
     光靠外键会留下指向已删除账号的悬空创建人。
     """
-    from app.models import AgentToken, Event, FeedToken
+    from app.models import AgentToken, Event, FeedToken, MailDelivery
 
     for token in session.execute(
         select(FeedToken).where(FeedToken.user_id == user.id)
@@ -406,6 +406,12 @@ def delete_user(session: Session, user: User) -> None:
         )
     ).scalars():
         recipient.scope_user_id = None
+    # 发信任务里的「发起人」同样不能悬空:邮件正文会按 `actor_user_id` 现查账号。
+    # 记录里的 `actor_label` 快照保留,历史邮件仍能说明当时是谁操作的。
+    for delivery in session.execute(
+        select(MailDelivery).where(MailDelivery.actor_user_id == user.id)
+    ).scalars():
+        delivery.actor_user_id = None
     session.flush()
 
     session.delete(user)
@@ -686,7 +692,10 @@ def sync_user_recipient(session: Session, user: User) -> SyncRecipient | None:
     - **邮箱还没验证** → 同样不建记录:验证前不发任何邮件,避免把日程发到一个
       还没确认归属的地址(验证通过时会再同步一次,见 `app/routers/auth.py`);
     - 邮箱已被一条**外部**收件人占用 → 直接认领那条记录(保留历史发送时间);
-    - 否则新建或更新,`user_id` 指向该账号,收信范围即该账号的可见日历。
+    - 否则新建或更新,`user_id` 指向该账号,收信范围即该账号的可见日历;
+    - **账号启用时这行必须是启用状态**:账号邮箱是「范围内用户的已认证邮箱」的唯一来源,
+      设置页与接口都不允许停用/删除它(停用收信的正确做法是停用账号),
+      所以这里顺手把被历史操作停用过的行恢复成启用。
 
     调用方负责提交事务。
     """
@@ -724,6 +733,8 @@ def sync_user_recipient(session: Session, user: User) -> SyncRecipient | None:
         claimed.scope_user_id = user.id
         if not claimed.display_name:
             claimed.display_name = user.label
+        if user.enabled:
+            claimed.enabled = True
         claimed.updated_at = utcnow()
         session.flush()
         return claimed
@@ -744,9 +755,61 @@ def sync_user_recipient(session: Session, user: User) -> SyncRecipient | None:
         existing.scope_user_id = user.id
         if not existing.display_name:
             existing.display_name = user.label
+        # 账号还在启用状态 → 这行必须启用(见上面的契约;设置页只维护外部邮箱)
+        if user.enabled and not existing.enabled:
+            existing.enabled = True
         existing.updated_at = utcnow()
     session.flush()
     return existing
+
+
+def _account_recipient_rows(
+    session: Session, *, user_id: str | None = None
+) -> list[SyncRecipient]:
+    """账号收件人行(`user_id` 非空);给了 `user_id` 就只取该账号名下的。"""
+    stmt = select(SyncRecipient).where(SyncRecipient.user_id.is_not(None))
+    if user_id is not None:
+        stmt = stmt.where(SyncRecipient.user_id == user_id)
+    return list(session.execute(stmt).scalars())
+
+
+def _account_recipient_snapshot(session: Session) -> dict[str, tuple]:
+    return {
+        row.id: (row.email, row.user_id, row.scope_user_id, bool(row.enabled))
+        for row in _account_recipient_rows(session)
+    }
+
+
+def sync_account_recipients(session: Session) -> int:
+    """把**全部账号**的邮箱对齐成收件人记录,返回发生变化的行数。
+
+    账号收件人是「范围内用户的已认证邮箱」的**唯一来源**,由账号资料派生:
+
+    - 启用且邮箱已验证的账号 → 一定有一条启用的账号收件人记录;
+    - 停用、或邮箱未验证/为空的账号 → 名下那行被停用/删除(停用账号不再收邮件)。
+
+    设置页与 `/api/v1/sync-recipients` 只维护**外部邮箱**,所以历史库里被删掉或
+    停用过的账号收件人行会在下一次发布前由这里自动补回来。调用方负责提交事务。
+    """
+    before = _account_recipient_snapshot(session)
+
+    for user in list_users(session):
+        if not user.enabled:
+            # 停用账号不再收邮件:保留记录但停用,账号重新启用后会自动恢复
+            for row in _account_recipient_rows(session, user_id=user.id):
+                if row.enabled:
+                    row.enabled = False
+                    row.updated_at = utcnow()
+            continue
+        sync_user_recipient(session, user)
+    session.flush()
+
+    after = _account_recipient_snapshot(session)
+    return sum(
+        1
+        for key in set(before) | set(after)
+        if before.get(key) != after.get(key)
+    )
 
 
 def recipient_scope_user_id(recipient: SyncRecipient) -> str | None:
@@ -798,6 +861,7 @@ __all__ = [
     "set_password",
     "set_user_enabled",
     "set_user_role",
+    "sync_account_recipients",
     "sync_user_recipient",
     "target_calendar_ids",
     "target_name",

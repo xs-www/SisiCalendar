@@ -3,8 +3,10 @@
   {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
 
   <p class="hint">
-    账号邮箱在「我的设置 → 个人资料」里由成员自己维护,这里主要管理<strong>外部邮箱</strong>
-    (没有账号、只收家庭共享日历的人)。账号邮箱对应的行会自动跟着成员资料变化。
+    这里只管理<strong>外部邮箱</strong>(没有账号、只收家庭共享日历的人)。
+    成员的<strong>账号邮箱</strong>不在这里维护:它在「我的设置 → 个人资料」里由本人填写,
+    <strong>邮箱通过验证后自动成为收件人</strong>,只会收到该成员自己可见的日历;
+    要停止某个账号收信,请到「成员」页停用该账号。账号邮箱见下方只读列表。
   </p>
 
   <form hx-post="{{ bp() }}/admin/partials/recipients"
@@ -33,7 +35,7 @@
     <table class="table">
       <thead>
         <tr>
-          <th>邮箱</th><th>名称</th><th>范围</th><th>状态</th><th>最后成功发送</th><th>操作</th>
+          <th>外部邮箱</th><th>名称</th><th>范围</th><th>状态</th><th>最后成功发送</th><th>操作</th>
         </tr>
       </thead>
       <tbody>
@@ -43,11 +45,7 @@
             <td>{{ recipient.display_name or '—' }}</td>
             <td>
               {% set scope_id = recipient.scope_user_id or recipient.user_id %}
-              {% if recipient.user_id %}
-                {% set owner = (users | selectattr('id', 'equalto', recipient.user_id) | list | first) %}
-                <span class="chip">本人可见日历</span>
-                {% if owner %}<span class="muted">{{ owner.username }}</span>{% endif %}
-              {% elif scope_id %}
+              {% if scope_id %}
                 {% set scoped = (users | selectattr('id', 'equalto', scope_id) | list | first) %}
                 <span class="chip">沿用{{ scoped.username if scoped else '成员' }}的可见日历</span>
                 <span class="muted">历史绑定</span>
@@ -84,6 +82,31 @@
       </tbody>
     </table>
   {% else %}
-    <p class="empty">还没有收件人。成员在「我的设置」里填上邮箱就会自动出现在这里。</p>
+    <p class="empty">还没有外部收件人。要给没有账号的家人发日历,在上面填一个邮箱即可。</p>
   {% endif %}
+
+  <p class="hint">
+    <strong>账号邮箱(自动同步,不能在这里增删)</strong>——改动落在某位成员可见的日历里时,
+    系统会把这次变更和一份「尚未结束的日程」快照发到他的邮箱;看不到这次改动的成员不会收到邮件。
+  </p>
+  <table class="table">
+    <thead>
+      <tr><th>成员</th><th>邮箱</th><th>收信范围</th><th>状态</th></tr>
+    </thead>
+    <tbody>
+      {% for entry in account_recipients %}
+        <tr class="{{ '' if entry.deliverable else 'muted-row' }}">
+          <td>
+            {{ entry.user.label }}
+            <span class="muted">{{ entry.user.username }}</span>
+          </td>
+          <td>{{ entry.email or '—' }}</td>
+          <td><span class="chip">本人可见日历(个人 + 家庭共享)</span></td>
+          <td>
+            <span class="chip {{ 'ok' if entry.deliverable else '' }}">{{ entry.status }}</span>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>

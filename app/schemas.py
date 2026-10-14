@@ -223,6 +223,8 @@ class DeliveryRead(BaseModel):
     recipient_id: str
     recipient_email: str
     change_type: str
+    #: 发起这次操作的账号显示名(快照);升级前的历史任务为 None
+    actor_label: str | None = None
     status: str
     attempt_count: int
     next_attempt_at: str | None = None

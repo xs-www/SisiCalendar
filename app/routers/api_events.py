@@ -216,6 +216,9 @@ def create_event_endpoint(
         change_type=CHANGE_CREATED,
         event=event,
         time_text=input_time_text(event, payload.start_at, payload.end_at),
+        actor_user_id=current.user_id,
+        actor_label=current.label,
+        changed_calendar_ids=[target_calendar_id],
     )
     logger.info(
         "事件已创建 id=%s calendar=%s user=%s sync_ok=%s",
@@ -268,13 +271,7 @@ def update_event_endpoint(
             ),
         )
 
-    moved = False
-    if payload.calendar_id and payload.calendar_id != event.calendar_id:
-        target_calendar_id = _resolve_write_calendar(
-            payload.calendar_id, access, existing_event_calendar_id=event.calendar_id
-        )
-        moved = move_event_to_calendar(session, event, target_calendar_id)
-
+    previous_calendar_id = event.calendar_id
     try:
         changed = update_event(session, event, payload, settings=settings)
     except EventConflictError as exc:
@@ -290,6 +287,15 @@ def update_event_endpoint(
     except EventValidationError as exc:
         session.rollback()
         raise _validation_error(exc) from exc
+
+    # 换日历必须放在乐观锁校验**之后**:`move_event_to_calendar` 会刷新 `updated_at`,
+    # 先搬家会让「客户端看到的那一版」被判成冲突(带 expected_updated_at 的搬家永远 409)。
+    moved = False
+    if payload.calendar_id and payload.calendar_id != event.calendar_id:
+        target_calendar_id = _resolve_write_calendar(
+            payload.calendar_id, access, existing_event_calendar_id=event.calendar_id
+        )
+        moved = move_event_to_calendar(session, event, target_calendar_id)
 
     if not changed and not moved:
         session.commit()
@@ -310,6 +316,10 @@ def update_event_endpoint(
         change_type=CHANGE_UPDATED,
         event=event,
         time_text=input_time_text(event, payload.start_at, payload.end_at),
+        actor_user_id=current.user_id,
+        actor_label=current.label,
+        # 事件可能刚从别的日历移过来:新旧两边的可见者都要被告知
+        changed_calendar_ids=[previous_calendar_id, event.calendar_id],
     )
     return {**serialize_event(event, access=access), "sync": outcome.as_dict()}
 
@@ -339,7 +349,14 @@ def delete_event_endpoint(
     session.commit()
 
     outcome = publish(
-        session, settings=settings, change_type=CHANGE_DELETED, event=event, event_title=title
+        session,
+        settings=settings,
+        change_type=CHANGE_DELETED,
+        event=event,
+        event_title=title,
+        actor_user_id=current.user_id,
+        actor_label=current.label,
+        changed_calendar_ids=[event.calendar_id],
     )
     logger.info("事件已软删除 id=%s user=%s sync_ok=%s", event_id, current.username, outcome.ok)
     return {"ok": True, "id": event_id, "sync": outcome.as_dict()}

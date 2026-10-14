@@ -33,11 +33,12 @@
 <section class="card">
   <header class="card-head">
     <h2>邮件收件人</h2>
-    <span class="chip">按范围分别发送</span>
+    <span class="chip">这里只加外部邮箱</span>
   </header>
   <p class="hint">
-    账号邮箱只收到<strong>自己可见且尚未结束</strong>的日程;外部邮箱只收<strong>家庭共享日历</strong>范围。
-    每封邮件只带对应范围的快照,不会把别人的私人日程发给外部邮箱。
+    <strong>账号邮箱是自动的</strong>:成员在「我的设置」里填好并通过验证后自动成为收件人,
+    收到的是<strong>他自己可见且尚未结束</strong>的日程;改动只发给<strong>看得见它的成员</strong>。
+    这张卡片管理的是<strong>外部邮箱</strong>——只收<strong>家庭共享日历</strong>范围,不含任何人的私人日程。
   </p>
   {% include "partials/recipients.html" %}
 </section>

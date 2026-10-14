@@ -22,7 +22,7 @@
       <dt>发布文件</dt><dd>{{ '存在' if sync_state.file_exists else '缺失' }}</dd>
       <dt>公开面基地址</dt><dd class="mono">{{ sync_state.public_base_url }}</dd>
       <dt>SMTP</dt><dd>{{ '已配置' if sync_state.mail_configured else '未配置' }}</dd>
-      <dt>邮件收件人</dt><dd>{{ sync_state.recipients_enabled }} 启用 / {{ sync_state.recipients_total }} 总计</dd>
+      <dt>邮件收件人</dt><dd>{{ sync_state.recipients_enabled }} 启用 / {{ sync_state.recipients_total }} 总计(账号邮箱自动 + 外部邮箱)</dd>
       <dt>上次成功发送</dt><dd>{{ sync_state.last_delivery_success_at or '—' }}</dd>
     </dl>
 
@@ -55,11 +55,11 @@
     </header>
 
     {% if deliveries %}
-      <p class="hint">「操作时间」为任务创建时刻;时间均按日历默认时区 {{ default_timezone }} 显示。</p>
+      <p class="hint">「操作时间」为任务创建时刻;「发起人」是触发这次变更的账号(手动同步不显示)。时间均按日历默认时区 {{ default_timezone }} 显示。</p>
       <table class="table">
         <thead>
           <tr>
-            <th>版本</th><th>收件人</th><th>类型</th><th>状态</th>
+            <th>版本</th><th>收件人</th><th>类型</th><th>发起人</th><th>状态</th>
             <th>尝试</th><th>操作时间</th><th>发送时间</th><th>下次重试</th>
             <th>错误</th><th>操作</th>
           </tr>
@@ -70,6 +70,7 @@
               <td>v{{ delivery.export_version }}</td>
               <td>{{ delivery.recipient_email }}</td>
               <td>{{ change_labels.get(delivery.change_type, delivery.change_type) }}</td>
+              <td>{{ delivery.actor_label or '—' }}</td>
               <td>
                 <span class="chip {{ 'ok' if delivery.status == 'sent' else ('warn' if delivery.status in ('failed','retry_wait') else '') }}">
                   {{ status_labels.get(delivery.status, delivery.status) }}

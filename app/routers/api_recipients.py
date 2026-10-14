@@ -6,9 +6,12 @@
   **该账号可见日历**里尚未结束的日程;
 - **外部收件人**(`user_id` 为空):只收到**家庭共享日历**范围,不含任何人的私人日程。
 
-所以本接口只负责外部邮箱,新增与启用都需要显式 `acknowledge_full_calendar=true`
-(表示管理员已确认对方的收信范围)。账号收件人不能在这里改名或删除,
-否则会和账号邮箱脱节;那类改动要走账号资料。
+账号收件人是**账号资料的派生结果**(启用 + 邮箱已验证,见
+`app/accounts.py::sync_account_recipients`),所以本接口只负责**外部邮箱**:
+新增与启用都需要显式 `acknowledge_full_calendar=true`(表示管理员已确认对方的收信范围),
+账号收件人不能在这里改名、启停或删除,否则会和账号邮箱脱节;那类改动要走账号资料
+(要停收信就停用账号)。账号收件人仍然**只读地**出现在列表里(`scope == "account"`),
+方便管理员看清谁在收信。
 """
 
 from __future__ import annotations
@@ -102,13 +105,14 @@ def _require_acknowledgement(payload: RecipientWrite, *, enabling: bool) -> None
 
 
 def _reject_account_recipient(recipient: SyncRecipient, *, action: str) -> None:
-    """账号收件人由账号邮箱派生,不通过本接口维护。"""
+    """账号收件人由账号邮箱派生,不通过本接口维护(改名、启停、删除都不行)。"""
     if recipient.user_id:
         raise HTTPException(
             409,
             error_payload(
                 "conflict",
-                f"「{recipient.email}」是账号邮箱,{action}请在成员页或该成员的「我的设置」里操作。",
+                f"「{recipient.email}」是账号邮箱,{action}请在成员页或该成员的「我的设置」里操作;"
+                "要让该账号停止收信,请停用这个账号。",
                 {"user_id": "账号邮箱不通过本接口维护"},
             ),
         )
@@ -159,7 +163,7 @@ def create_recipient(
     return serialize_recipient(recipient, session=session)
 
 
-@router.patch("/sync-recipients/{recipient_id}", summary="修改名称或启用状态")
+@router.patch("/sync-recipients/{recipient_id}", summary="修改外部收件人")
 def update_recipient(
     recipient_id: str,
     payload: RecipientWrite,
@@ -190,6 +194,8 @@ def update_recipient(
         recipient.display_name = payload.display_name.strip() or None
 
     if payload.enabled is not None:
+        # 账号邮箱只在账号资料里维护:启用/停用同样不通过本接口(停用账号 = 停止收信)
+        _reject_account_recipient(recipient, action="停用或启用")
         enabling = bool(payload.enabled) and not recipient.enabled
         if enabling:
             _require_acknowledgement(payload, enabling=True)

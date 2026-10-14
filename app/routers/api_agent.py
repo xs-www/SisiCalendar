@@ -242,6 +242,11 @@ async def agent_create_event(
         event=event,
         # 提交时间带偏移量时,邮件正文按「提交者当时的钟点」表述
         time_text=input_time_text(event, payload.start_at, payload.end_at),
+        # 邮件里的「发起人」= 令牌绑定的账号(快捷指令/AI 都是替这个人写日程)
+        actor_user_id=user.id,
+        actor_label=user.label,
+        # 只通知「看得见这条日历」的人
+        changed_calendar_ids=[calendar_id],
     )
     AuditLog.record(
         "agent_create",

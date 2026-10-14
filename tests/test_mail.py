@@ -795,6 +795,10 @@ def test_agent_submitted_offset_reaches_the_mail_body(
             )
         )
         prepared.commit()
+        # 外部收件人的范围是家庭共享日历:日程必须落在共享日历里才会通知到它
+        from app.accounts import list_shared_calendars
+
+        shared_id = list_shared_calendars(prepared)[0].id
     finally:
         prepared.close()
 
@@ -804,6 +808,7 @@ def test_agent_submitted_offset_reaches_the_mail_body(
             "title": "悉尼的会",
             "start_at": "2026-11-03T14:00:00+11:00",
             "end_at": "2026-11-03T15:00:00+11:00",
+            "calendar_id": shared_id,
         },
         headers=agent_headers,
     )

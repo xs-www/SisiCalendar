@@ -43,6 +43,7 @@ from app.accounts import (
     set_password,
     set_user_enabled,
     set_user_role,
+    sync_account_recipients,
     sync_user_recipient,
     update_profile,
     user_timezone,
@@ -131,9 +132,58 @@ def _timezone_context(current: str | None = None) -> dict[str, object]:
 
 
 def _recipients(session: Session) -> list[SyncRecipient]:
+    """设置页维护的收件人:**只有外部邮箱**。
+
+    账号收件人由账号资料派生(见 `app/accounts.py::sync_account_recipients`),
+    在这里既不能停用也不能删除,所以不进入这张可操作的表格,只在下方只读列出。
+    """
     return list(
-        session.execute(select(SyncRecipient).order_by(SyncRecipient.created_at.asc())).scalars()
+        session.execute(
+            select(SyncRecipient)
+            .where(SyncRecipient.user_id.is_(None))
+            .order_by(SyncRecipient.created_at.asc())
+        ).scalars()
     )
+
+
+def _account_recipient_entries(session: Session) -> list[dict[str, object]]:
+    """只读展示:哪些账号邮箱会**自动**收到日历邮件。
+
+    这是「设置里的同步邮箱」收敛到外部邮箱之后,管理员仍然需要看到的那一半信息:
+    账号邮箱不在这里维护,但必须看得见谁在收信、以及没收上的原因。
+    """
+    entries: list[dict[str, object]] = []
+    for user in list_users(session):
+        address = (user.email or "").strip()
+        verified = user.email_verified_at is not None
+        if not user.enabled:
+            status = "账号已停用,不收信"
+        elif not address:
+            status = "未填邮箱"
+        elif not verified:
+            status = "邮箱待验证"
+        else:
+            status = "自动同步中"
+        entries.append(
+            {
+                "user": user,
+                "email": address,
+                "verified": verified,
+                "deliverable": bool(user.enabled and address and verified),
+                "status": status,
+            }
+        )
+    return entries
+
+
+def _guard_external_recipient(recipient: SyncRecipient, action: str) -> str | None:
+    """账号邮箱只能在账号资料里维护;返回给用户看的提示,外部邮箱返回 `None`。"""
+    if recipient.user_id:
+        return (
+            f"「{mask_email(recipient.email)}」是账号邮箱,自动跟随成员资料,不能在这里{action};"
+            "要让这个账号停止收信,请到「成员」页停用该账号。"
+        )
+    return None
 
 
 def _deliveries(session: Session, limit: int = 30) -> list[MailDelivery]:
@@ -1196,11 +1246,15 @@ def settings_page(
 ) -> Response:
     settings = effective_settings(session)
     overrides = load_overrides(session)
+    # 账号收件人由账号资料派生:整页渲染前对齐一次(被历史操作删掉/停用的行会自动补回)
+    if sync_account_recipients(session):
+        session.commit()
     context = _base_context(request, session, settings, active="settings")
     context.update(
         {
             "overrides": overrides,
             "recipients": _recipients(session),
+            "account_recipients": _account_recipient_entries(session),
             "tokens": token_store.list_tokens(session),
             "family_feed_tokens": feed_tokens.list_feed_tokens(session, user_id=None),
             "users": list_users(session),
@@ -1262,12 +1316,16 @@ def _recipient_partial(
     error: str | None = None,
     status_code: int = 200,
 ) -> Response:
+    # 账号收件人由账号资料派生:渲染前对齐一次,页面与邮件队列看到的是同一份事实
+    if sync_account_recipients(session):
+        session.commit()
     return templates.TemplateResponse(
         request,
         "partials/recipients.html",
         {
             "request": request,
             "recipients": _recipients(session),
+            "account_recipients": _account_recipient_entries(session),
             "users": list_users(session),
             "csrf_token": _csrf_of(request, session),
             "default_timezone": settings.default_timezone,
@@ -1360,6 +1418,9 @@ def toggle_recipient(
         return _recipient_partial(
             request, session, settings, error="收件人不存在。", status_code=404
         )
+    blocked = _guard_external_recipient(recipient, "停用或启用")
+    if blocked:
+        return _recipient_partial(request, session, settings, error=blocked, status_code=409)
     if not recipient.enabled and not acknowledge:
         return _recipient_partial(
             request,
@@ -1397,6 +1458,9 @@ def remove_recipient(
         return _recipient_partial(
             request, session, settings, error="收件人不存在。", status_code=404
         )
+    blocked = _guard_external_recipient(recipient, "移除")
+    if blocked:
+        return _recipient_partial(request, session, settings, error=blocked, status_code=409)
     masked = mask_email(recipient.email)
     session.delete(recipient)
     session.commit()
@@ -1838,7 +1902,13 @@ def regenerate_action(
             error=f"操作过于频繁,请 {retry_after} 秒后再试。",
             status_code=429,
         )
-    outcome = publish(session, settings=settings, force_new_version=True)
+    outcome = publish(
+        session,
+        settings=settings,
+        force_new_version=True,
+        actor_user_id=admin.user_id,
+        actor_label=admin.label,
+    )
     if outcome.ok:
         notice = f"已重新生成 version={outcome.version}"
         if outcome.mail_created:
@@ -1889,12 +1959,20 @@ def send_latest_action(
             status_code=429,
         )
 
-    outcome = publish(session, settings=settings)
+    outcome = publish(
+        session, settings=settings, actor_user_id=admin.user_id, actor_label=admin.label
+    )
     if not outcome.ok:
         return _sync_partial(
             request, session, settings, error=outcome.error, status_code=500
         )
-    created = send_latest_to_enabled(session, settings=settings, snapshot_version=outcome.version)
+    created = send_latest_to_enabled(
+        session,
+        settings=settings,
+        snapshot_version=outcome.version,
+        actor_user_id=admin.user_id,
+        actor_label=admin.label,
+    )
     session.commit()
     summary = process_queue(session, settings=settings, limit=50)
     session.commit()

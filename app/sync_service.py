@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone
 
@@ -125,22 +126,46 @@ def _persist_failure(session: Session, message: str) -> None:
 
 
 def publish(
-    session: Session,    *,
+    session: Session,
+    *,
     settings: Settings | None = None,
     change_type: str = CHANGE_MANUAL,
     event: Event | None = None,
     event_title: str | None = None,
     time_text: str | None = None,
+    actor_user_id: str | None = None,
+    actor_label: str | None = None,
+    changed_calendar_ids: Iterable[str] | None = None,
     force_new_version: bool = False,
 ) -> SyncOutcome:
     """生成新版 ICS 并为启用人员创建发信任务。
 
     调用前调用方必须已经提交过一次事务(事件已落库、`dirty` 已置位),
     这样即便导出失败,用户的编辑也不会丢失。
+
+    `changed_calendar_ids` 是**这次改动落在哪些日历里**。不给时按 `event.calendar_id`
+    推断(具体日程的增删改都知道自己在哪条日历里);事件在日历之间移动时调用方要把
+    新旧两边的 id 都传进来。发信任务只发给「可见范围包含其中任意一条日历」的收件人:
+    看不见这次改动的人不发信。手动群发、CLI 导出与后台修复既没有事件也没有日历,
+    留空即「发给全部收件人」。
+
+    `actor_user_id` / `actor_label` 是**本次操作发起人**(调用方从当前登录者或 Agent
+    令牌绑定账号取出)。它只在「新增/修改/删除日程」这类具体日程变更上写进邮件正文的
+    「发起人」一行;手动同步(重新生成、向当前人员发送最新版)不写这行,以免把管理员的
+    群发说成「某人改了一条日程」。取不到发起人时留空,正文显示「未记录」。
+
+    一句话:**发起人是「谁在操作」,不是「事件是谁建的」**。事件上的
+    `created_by_user_id` 只记录创建人,拿它当发起人会把别人的改动记到创建人头上,
+    所以这里不读它,由调用方显式传。
     """
     resolved = settings or get_settings()
     title = event_title if event_title is not None else (event.title if event else None)
     time_label = time_text if time_text is not None else (event_time_text(event) if event else None)
+    if changed_calendar_ids is None:
+        # 兜底:具体日程的变更总是知道自己落在哪条日历里
+        calendars = [event.calendar_id] if event is not None and event.calendar_id else []
+    else:
+        calendars = [item for item in changed_calendar_ids if item]
 
     try:
         result = export_calendar(
@@ -155,6 +180,9 @@ def publish(
                 trigger_event_id=event.id if event else None,
                 event_title=title,
                 event_time_text=time_label,
+                actor_user_id=actor_user_id,
+                actor_label=actor_label,
+                changed_calendar_ids=calendars or None,
                 settings=resolved,
             )
         session.commit()
@@ -263,6 +291,7 @@ def overview(session: Session, *, settings: Settings | None = None) -> dict[str,
                     "export_version": row.export_version,
                     "recipient_email": mask_email(row.recipient_email),
                     "change_type": row.change_type,
+                    "actor_label": row.actor_label,
                     "status": row.status,
                     "attempt_count": row.attempt_count,
                     "next_attempt_at": iso_utc(row.next_attempt_at),

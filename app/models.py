@@ -438,6 +438,12 @@ class MailDelivery(Base):
     # 事件信息快照:重试时仍能还原当时的主语与时间描述
     event_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     event_time_text: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 发起人的**账号 id**:邮件正文与队列里的「发起人」按它现查账号显示名。
+    # 故意不写外键:`batch_alter_table` 加列不带外键,升级库与新建库的行为必须一致,
+    # 删账号时由 `app/accounts.py::delete_user` 显式置空(见 AGENTS.md 不变量 20)。
+    actor_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # 发起人的显示名快照:账号后来删除/改名时仍能说明当时是谁操作的
+    actor_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
     change_type: Mapped[str] = mapped_column(String(20), nullable=False, default=CHANGE_MANUAL)
     attachment_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot_path: Mapped[str] = mapped_column(String(512), nullable=False)

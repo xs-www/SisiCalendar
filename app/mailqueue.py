@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -21,7 +22,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app import urls
-from app.accounts import recipient_scope_user_id
+from app.accounts import (
+    family_calendar_ids,
+    recipient_scope_user_id,
+    sync_account_recipients,
+    target_calendar_ids,
+)
 from app.config import Settings, get_settings
 from app.exporter import (
     feed_target_key,
@@ -102,6 +108,25 @@ def attachment_source(
     return Path(export.snapshot_path), export.content_hash
 
 
+def _scope_calendar_ids(
+    session: Session,
+    recipient: SyncRecipient,
+    cache: dict[str | None, set[str]],
+) -> set[str]:
+    """这位收件人能看见的日历集合(与邮件附件用的是同一套范围判定)。
+
+    账号收件人与 `scope_user_id` 指向某账号的历史外部邮箱 = 该账号的可见范围;
+    其余外部邮箱 = 家庭共享日历。同一个范围内只查一次库。
+    """
+    scope_user_id = recipient_scope_user_id(recipient)
+    if scope_user_id not in cache:
+        if scope_user_id:
+            cache[scope_user_id] = set(target_calendar_ids(session, user_id=scope_user_id))
+        else:
+            cache[scope_user_id] = set(family_calendar_ids(session))
+    return cache[scope_user_id]
+
+
 def ensure_delivery_tasks(
     session: Session,
     *,
@@ -110,6 +135,9 @@ def ensure_delivery_tasks(
     trigger_event_id: str | None = None,
     event_title: str | None = None,
     event_time_text: str | None = None,
+    actor_user_id: str | None = None,
+    actor_label: str | None = None,
+    changed_calendar_ids: Iterable[str] | None = None,
     settings: Settings | None = None,
 ) -> int:
     """为指定导出版本创建缺失的发信任务,返回新建数量。
@@ -119,6 +147,17 @@ def ensure_delivery_tasks(
 
     附件按**收件人范围**取:账号收件人拿到「他可见日历里尚未结束的日程」,
     外部邮箱拿到「家庭共享日历里尚未结束的日程」。
+
+    收件人按**这次改动落在谁的可见范围里**筛选(`changed_calendar_ids`):看不见这条
+    日程的人不发信——否则他会收到一封附件里根本没有这条日程的邮件。
+    调用方拿不到改动的日历(手动群发、CLI 导出、后台修复)时传空,表示「全部收件人」。
+
+    **账号收件人在建任务前重新对齐一次**:账号邮箱是「范围内用户的已认证邮箱」的唯一
+    来源,由账号资料派生;设置页只维护外部邮箱,所以历史库里被删掉或停用过的账号收件人
+    行会在这里自动补回来(见 `app/accounts.py::sync_account_recipients`)。
+
+    发起人(`actor_user_id` + `actor_label` 快照)在建任务这一刻固化:重试发信时
+    不会再问「现在是谁登录」,发出去的永远是当时那个人。
     """
     resolved = settings or get_settings()
     if not resolved.mail_configured:
@@ -129,6 +168,9 @@ def ensure_delivery_tasks(
     if export is None:
         logger.warning("导出版本不存在,无法创建发信任务 version=%s", export_version)
         return 0
+
+    # 账号邮箱(已认证)必须先成为收件人,否则「范围内的家人」永远收不到信
+    repaired = sync_account_recipients(session)
 
     recipients = enabled_recipients(session)
     if not recipients:
@@ -143,10 +185,19 @@ def ensure_delivery_tasks(
         )
     }
 
+    changed_calendars = {item for item in (changed_calendar_ids or ()) if item}
+    snapshot_label = (actor_label or "").strip()[:100] or None
     created = 0
+    skipped = 0
     sources: dict[str, tuple[Path, str]] = {}
+    scopes: dict[str | None, set[str]] = {}
     for recipient in recipients:
         if recipient.id in existing:
+            continue
+        if changed_calendars and not (
+            _scope_calendar_ids(session, recipient, scopes) & changed_calendars
+        ):
+            skipped += 1
             continue
         key = feed_target_key(user_id=recipient_scope_user_id(recipient))
         if key not in sources:
@@ -160,6 +211,8 @@ def ensure_delivery_tasks(
                 trigger_event_id=trigger_event_id,
                 event_title=(event_title or None),
                 event_time_text=(event_time_text or None),
+                actor_user_id=actor_user_id or None,
+                actor_label=snapshot_label,
                 change_type=change_type,
                 attachment_hash=attachment_hash,
                 snapshot_path=str(attachment_path),
@@ -170,10 +223,15 @@ def ensure_delivery_tasks(
             )
         )
         created += 1
-    if created:
+    if created or repaired or skipped:
         session.flush()
         logger.info(
-            "已创建 %s 个发信任务 version=%s change=%s", created, export_version, change_type
+            "已创建 %s 个发信任务 version=%s change=%s 收件人修复=%s 范围外跳过=%s",
+            created,
+            export_version,
+            change_type,
+            repaired,
+            skipped,
         )
     return created
 
@@ -191,6 +249,25 @@ def _subject_for(
     return template.format(calendar=calendar_name)
 
 
+def _actor_name(session: Session, delivery: MailDelivery) -> str | None:
+    """邮件正文里「发起人」那一行的名字,认不出就返回 None。
+
+    优先按 `actor_user_id` **现查**账号(界面改了显示名,还没发出去的邮件也跟着变),
+    查不到时退回任务记录里的 `actor_label` 快照,两个都没有就返回 None
+    (升级前的历史任务没有发起人信息,正文写「未记录」,不编造名字)。
+    """
+    name = ""
+    if delivery.actor_user_id:
+        from app.accounts import get_user
+
+        user = get_user(session, delivery.actor_user_id)
+        if user is not None:
+            name = (user.label or "").strip()
+    if not name:
+        name = (delivery.actor_label or "").strip()
+    return name or None
+
+
 def _body_for(
     delivery: MailDelivery,
     *,
@@ -200,6 +277,7 @@ def _body_for(
     generated_at: datetime | None,
     event_title: str | None,
     event_time_text: str | None,
+    actor_label: str | None = None,
 ) -> str:
     action = {
         CHANGE_CREATED: "新增日程",
@@ -213,6 +291,10 @@ def _body_for(
         "",
         f"本次操作:{action}",
     ]
+    # 「谁改的」只加在**具体日程**的增删改上:手动同步是管理员主动群发,
+    # 说成「谁操作的」没有意义(收件人关心的是日历本身)。
+    if delivery.change_type in (CHANGE_CREATED, CHANGE_UPDATED, CHANGE_DELETED):
+        lines.append(f"发起人:{actor_label or '未记录'}")
     if event_title:
         lines.append(f"事件标题:{event_title}")
     if event_time_text:
@@ -328,6 +410,7 @@ def attempt_delivery(
             generated_at=export.created_at if export else (state.generated_at if state else None),
             event_title=event_title,
             event_time_text=event_time_text,
+            actor_label=_actor_name(session, delivery),
         )
         message = build_message(
             config=config,
@@ -484,8 +567,14 @@ def send_latest_to_enabled(
     *,
     settings: Settings | None = None,
     snapshot_version: int | None = None,
+    actor_user_id: str | None = None,
+    actor_label: str | None = None,
 ) -> int:
-    """为当前(或指定)导出版本补齐任务,返回新建任务数。"""
+    """为当前(或指定)导出版本补齐任务,返回新建任务数。
+
+    这是「向当前人员发送最新版」的入口(手动同步),任务类型固定为 `CHANGE_MANUAL`:
+    发起人只记录在任务里备查,**正文不出现**「发起人」那一行(见 `_body_for`)。
+    """
     if snapshot_version is None:
         state = session.get(CalendarExportState, CalendarExportState.SINGLETON_ID)
         snapshot_version = state.version if state else 0
@@ -493,5 +582,7 @@ def send_latest_to_enabled(
         session,
         export_version=snapshot_version or 0,
         change_type=CHANGE_MANUAL,
+        actor_user_id=actor_user_id,
+        actor_label=actor_label,
         settings=settings,
     )
