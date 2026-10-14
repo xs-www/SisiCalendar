@@ -177,6 +177,32 @@ def test_tailnet_visit_is_auto_filled_but_localhost_is_not(admin_client) -> None
     assert "请手动填写" in local.text
 
 
+def test_tailnet_hint_scheme_falls_back_to_the_configured_base(settings) -> None:
+    """没有 `X-Forwarded-Proto` 时按 `PUBLIC_BASE_URL` 的协议兜底,而不是硬猜 https。"""
+
+    class _Request:
+        def __init__(self, host: str, proto: str | None = None) -> None:
+            self.headers = {"host": host}
+            if proto is not None:
+                self.headers["x-forwarded-proto"] = proto
+
+    https_settings = settings.model_copy(
+        update={"public_base_url": "https://example.test/calendar"}
+    )
+    http_settings = settings.model_copy(
+        update={"public_base_url": "http://127.0.0.1:18099/calendar"}
+    )
+    node = "node.tail921448.ts.net"
+
+    assert pages._tailnet_origin_hint(_Request(node), https_settings) == f"https://{node}"
+    assert pages._tailnet_origin_hint(_Request(node), http_settings) == f"http://{node}"
+    # 转发头优先
+    assert pages._tailnet_origin_hint(_Request(node, "http"), https_settings) == f"http://{node}"
+    # 非 tailnet 域名一律不猜
+    assert pages._tailnet_origin_hint(_Request("localhost:443"), https_settings) == ""
+    assert pages._tailnet_origin_hint(_Request("[::1]:443"), https_settings) == ""
+
+
 def test_saving_the_card_field_updates_the_effective_url(admin_client, api_headers) -> None:
     page = admin_client.get("/admin/partials/settings")
     import re

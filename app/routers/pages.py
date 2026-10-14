@@ -1798,7 +1798,7 @@ def _tailnet_origin_hint(request: Request, settings: Settings) -> str:
         (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
     )
     if scheme not in {"http", "https"}:
-        scheme = "https"
+        scheme = "https" if settings.public_base_url.lower().startswith("https") else "http"
     return f"{scheme}://{name}"
 
 

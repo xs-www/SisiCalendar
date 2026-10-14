@@ -99,12 +99,19 @@ def clear_code(settings: Settings) -> bool:
 
 
 def verify_code(settings: Settings, candidate: object) -> bool:
-    """常量时间比较引导码;任一侧为空一律 `False`。"""
+    """常量时间比较引导码;任一侧为空一律 `False`。
+
+    两侧都先编码成字节再比较:`hmac.compare_digest` 对**非 ASCII 的 `str`** 会抛
+    `TypeError`(用户在表单里粘一段中文就会变成 500),编码之后统一按「不相等」处理。
+    """
     expected = read_code(settings)
     text = str(candidate or "").strip()
     if not expected or not text:
         return False
-    return hmac.compare_digest(expected, text)
+    try:
+        return hmac.compare_digest(expected.encode("utf-8"), text.encode("utf-8"))
+    except UnicodeEncodeError:  # 无法编码的输入(如代理对):必然不相等
+        return False
 
 
 def pending_owner(session: Session) -> User | None:

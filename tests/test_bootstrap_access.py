@@ -83,6 +83,14 @@ def test_code_is_random_and_rotation_invalidates_the_old_one(settings) -> None:
     assert bootstrap_access.verify_code(settings, rotated)
 
 
+def test_non_ascii_candidate_is_rejected_instead_of_crashing(settings) -> None:
+    """`hmac.compare_digest` 对非 ASCII 的 str 会抛 TypeError:必须当成「不相等」。"""
+    code = bootstrap_access.ensure_code(settings)
+    assert bootstrap_access.verify_code(settings, "中文引导码") is False
+    assert bootstrap_access.verify_code(settings, f"{code}中文") is False
+    assert bootstrap_access.verify_code(settings, code) is True
+
+
 def test_bootstrap_url_is_built_from_the_public_base(settings) -> None:
     url = bootstrap_access.bootstrap_url(settings, "sisi_boot_demo")
     assert url == "https://example.test/calendar/bootstrap?code=sisi_boot_demo"
@@ -166,6 +174,11 @@ def test_wrong_code_and_bad_password_keep_the_channel_open(client, settings, pen
 
     wrong = client.post("/bootstrap", data=_post_payload("sisi_boot_not-the-code", csrf))
     assert wrong.status_code == 401
+    assert bootstrap_access.read_code(settings) == pending_admin
+
+    # 非 ASCII 的码也必须走「码错」这条路,不能 500
+    chinese = client.post("/bootstrap", data=_post_payload("中文引导码", csrf))
+    assert chinese.status_code == 401
     assert bootstrap_access.read_code(settings) == pending_admin
 
     mismatch = client.post(
