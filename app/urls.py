@@ -83,8 +83,11 @@ def is_api_path(path: str) -> bool:
 
 
 def is_admin_path(path: str) -> bool:
-    """管理/登录页(需要挂严格 CSP):`/admin`、`/login`、`/register` 及其前缀形式。"""
-    return relative(path).startswith(("/admin", "/login", "/register", "/verify-email"))
+    """管理/登录页(需要挂严格 CSP):`/admin`、`/login`、`/register`、`/verify-email`、
+    `/bootstrap` 及其前缀形式。"""
+    return relative(path).startswith(
+        ("/admin", "/login", "/register", "/verify-email", "/bootstrap")
+    )
 
 
 def invite_url(settings: Settings, code: str) -> str:

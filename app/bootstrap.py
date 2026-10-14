@@ -70,6 +70,7 @@ def ensure_family_setup(session: Session, settings: Settings) -> None:
         personal_calendar,
         sync_account_recipients,
     )
+    from app.bootstrap_access import bootstrap_url, code_path, sync_code_state
     from app.feed_tokens import ensure_account_feed_token, fixed_account_token
     from app.models import (
         DEFAULT_USER_COLORS,
@@ -188,6 +189,21 @@ def ensure_family_setup(session: Session, settings: Settings) -> None:
     # 会话状态判断会漏判(早先只看 `changed` 标记,漏标的修复会被调用方静默回滚)。
     # 这里统一提交一次;调用方(启动流程)本来就是「跑完即提交」的语义。
     session.commit()
+
+    # 首位管理员还在用初始口令时,把救援通道落到**文件**上:
+    # 口令是随机生成的话,明文只有那一行启动日志,`docker logs` 一卡就永久丢失
+    # (真机事故)。文件随时可读,而且口令一旦被设置就自动失效。
+    # 注意:这里**只记文件路径,不记引导码本身**(引导码不进日志正文)。
+    bootstrap_code = sync_code_state(session, settings)
+    if bootstrap_code:
+        logger.warning(
+            "首位管理员仍在初始口令状态;引导码在文件 %s(可直接读取,不依赖本日志)",
+            code_path(settings),
+        )
+        logger.warning(
+            "完整引导地址用 `python -m app.cli bootstrap` 打印;基地址:%s",
+            bootstrap_url(settings, bootstrap_code).split("?")[0],
+        )
 
 
 def startup_checks(session: Session, settings: Settings) -> None:

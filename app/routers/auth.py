@@ -14,15 +14,16 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, Request, Response
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
-from app import email_verify, invites, urls
+from app import bootstrap_access, email_verify, invites, urls
 from app.accounts import (
     AccountError,
     authenticate_user,
     mark_login,
+    set_password,
     sync_user_recipient,
     update_profile,
 )
@@ -56,6 +57,9 @@ LOGIN_RATE_LIMIT = 8
 LOGIN_RATE_WINDOW_SECONDS = 300
 REGISTER_RATE_LIMIT = 5
 REGISTER_RATE_WINDOW_SECONDS = 600
+#: 引导码通道的限流:5 次 / 600 秒(引导码本身是高熵随机,限流只是防扫)
+BOOTSTRAP_RATE_LIMIT = 5
+BOOTSTRAP_RATE_WINDOW_SECONDS = 600
 
 
 def _client_key(request: Request) -> str:
@@ -597,4 +601,126 @@ def verify_email_change(
             error=None if mailed else "邮件发送失败,请稍后重试。",
         ),
         status_code=200 if mailed else 503,
+    )
+
+
+# --------------------------------------------------------------------------
+# 初始口令救援通道(2026-10-14 新增)
+#
+# 首位管理员的口令若是随机生成的,明文**只在启动日志里出现一次**;`docker logs` 一卡
+# 就永久丢失(真机事故)。因此引导码被落成 `<DATA_DIR>/bootstrap_code` 文件,
+# 随时可读;它只在 `must_change_password` 为真时有效,口令一设置就自动关闭。
+# 详见 `app/bootstrap_access.py`。
+# --------------------------------------------------------------------------
+BOOTSTRAP_CLOSED_DETAIL = (
+    "引导通道已关闭:首位管理员的口令不是初始口令。"
+    "忘记口令请在服务器上执行 `python -m app.cli reset-admin-password`。"
+)
+
+
+def _bootstrap_context(
+    request: Request,
+    settings: Settings,
+    *,
+    code: str = "",
+    error: str | None = None,
+    notice: str | None = None,
+) -> dict[str, object]:
+    csrf_token = create_login_csrf(settings)
+    return {
+        "request": request,
+        "error": error,
+        "notice": notice,
+        "code": code,
+        "login_csrf": csrf_token,
+        "calendar_name": settings.calendar_name,
+        "code_file": str(bootstrap_access.code_path(settings)),
+        "cookie_name": LOGIN_CSRF_COOKIE_NAME,
+        "cookie_value": csrf_token,
+    }
+
+
+@router.get("/bootstrap", response_class=HTMLResponse, include_in_schema=False)
+def bootstrap_page(
+    request: Request,
+    code: str = "",
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_db),
+) -> Response:
+    """首位管理员的「设置初始口令」页;口令已设置过则整条通道 404。"""
+    resolved = effective_settings(session, settings)
+    if bootstrap_access.pending_owner(session) is None:
+        raise HTTPException(status_code=404, detail=BOOTSTRAP_CLOSED_DETAIL)
+    # 仍处于初始口令状态:确保引导码文件在(被手工删掉时自愈),这一页才是可用的
+    bootstrap_access.ensure_code(resolved)
+    context = _bootstrap_context(request, resolved, code=code.strip())
+    response = templates.TemplateResponse(request, "bootstrap.html", context)
+    _set_login_cookies(response, resolved, str(context["login_csrf"]))
+    return response
+
+
+@router.post("/bootstrap", response_class=HTMLResponse, include_in_schema=False)
+def bootstrap_submit(
+    request: Request,
+    code: str = Form(default=""),
+    password: str = Form(default=""),
+    password_confirm: str = Form(default=""),
+    csrf_token: str = Form(default=""),
+    settings: Settings = Depends(get_settings),
+    session: Session = Depends(get_db),
+) -> Response:
+    """用引导码设置首位管理员口令,成功后立刻关闭通道。"""
+    resolved = effective_settings(session, settings)
+    client = _client_key(request)
+
+    def failure(message: str, status_code: int) -> Response:
+        return templates.TemplateResponse(
+            request,
+            "bootstrap.html",
+            _bootstrap_context(request, resolved, code=code, error=message),
+            status_code=status_code,
+        )
+
+    allowed, retry_after = rate_limiter.check(
+        f"bootstrap:{client}",
+        limit=BOOTSTRAP_RATE_LIMIT,
+        window_seconds=BOOTSTRAP_RATE_WINDOW_SECONDS,
+    )
+    if not allowed:
+        AuditLog.record("bootstrap", "rate_limited", actor=client)
+        response = failure(f"尝试过于频繁,请在 {retry_after} 秒后重试。", 429)
+        response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    cookie_token = request.cookies.get(LOGIN_CSRF_COOKIE_NAME)
+    if not verify_login_csrf(cookie_token, csrf_token, resolved):
+        AuditLog.record("bootstrap", "csrf_failed", actor=client)
+        return failure("表单已过期,请重新提交。", 400)
+
+    owner = bootstrap_access.pending_owner(session)
+    if owner is None:
+        raise HTTPException(status_code=404, detail=BOOTSTRAP_CLOSED_DETAIL)
+
+    if not bootstrap_access.verify_code(resolved, code):
+        AuditLog.record("bootstrap", "denied", actor=client)
+        return failure(
+            "引导码不正确:请把引导码文件里的那一串整行复制过来(区分大小写)。", 401
+        )
+
+    if password != password_confirm:
+        return failure("两次输入的口令不一致。", 422)
+
+    try:
+        set_password(session, owner, password, must_change=False)
+    except AccountError as exc:
+        session.rollback()
+        return failure(";".join(exc.fields.values()), 422)
+
+    session.commit()
+    # 口令已设置:引导码文件立刻删除,`must_change_password` 也已清零 → 通道关闭
+    bootstrap_access.clear_code(resolved)
+    rate_limiter.reset(f"bootstrap:{client}")
+    AuditLog.record("bootstrap", "success", actor=owner.username)
+    return RedirectResponse(
+        urls.url("/login") + "?notice=管理员口令已设置,请用它登录。", status_code=303
     )

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>设置管理员口令 · {{ calendar_name }}</title>
+  <link rel="stylesheet" href="{{ asset('css/app.css') }}">
+</head>
+<body class="login-body">
+  <form class="login-card" method="post" action="{{ bp() }}/bootstrap">
+    <h1>设置管理员口令</h1>
+    <p class="muted">
+      首位管理员的初始口令是由系统随机生成的,明文只在启动日志里出现过一次。
+      在这里用引导码重设一个你自己的口令。
+    </p>
+
+    {% if notice %}<div class="alert ok">{{ notice }}</div>{% endif %}
+    {% if error %}<div class="alert error">{{ error }}</div>{% endif %}
+
+    <input type="hidden" name="csrf_token" value="{{ login_csrf }}">
+
+    <label>引导码
+      <input type="text" name="code" value="{{ code }}" autocomplete="off" autofocus required>
+    </label>
+    <p class="hint">
+      引导码就在服务器的 <code>{{ code_file }}</code> 文件里,整行复制即可(区分大小写)。
+      容器里可以这样读:<code>docker compose exec calendar cat {{ code_file }}</code>。
+    </p>
+
+    <label>新口令
+      <input type="password" name="password" autocomplete="new-password" required>
+    </label>
+    <label>再输一次
+      <input type="password" name="password_confirm" autocomplete="new-password" required>
+    </label>
+
+    <button type="submit" class="primary wide">设置口令并关闭引导通道</button>
+    <p class="hint">
+      设置成功后引导码文件会被删除,这个地址也随之失效;忘记口令时用
+      <code>python -m app.cli reset-admin-password</code> 在服务器上重置。
+    </p>
+  </form>
+</body>
+</html>

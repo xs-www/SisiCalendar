@@ -8,6 +8,9 @@
     python -m app.cli verify
     python -m app.cli hash-password
     python -m app.cli process-mail
+    python -m app.cli bootstrap
+    python -m app.cli bootstrap --rotate
+    python -m app.cli reset-admin-password
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import argparse
 import getpass
 import json
 import logging
+import secrets
 import sys
 from pathlib import Path
 
@@ -158,6 +162,97 @@ def cmd_show_credential(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_bootstrap(args: argparse.Namespace, settings: Settings) -> int:
+    """查看(必要时生成)首位管理员的引导码与完整引导地址。
+
+    首位管理员的口令若是随机生成的,明文只在启动日志里出现过一次;引导码文件
+    是**不依赖日志**的那条路(见 `app/bootstrap_access.py`)。
+    """
+    _prepare(settings)
+    from app.bootstrap_access import bootstrap_url, code_path, ensure_code, pending_owner
+
+    with session_scope() as session:
+        owner = pending_owner(session)
+        if owner is None:
+            print(
+                json.dumps(
+                    {
+                        "status": "not_pending",
+                        "hint": (
+                            "首位管理员的口令不是初始口令,引导通道已关闭。"
+                            "忘记口令请用 `python -m app.cli reset-admin-password`。"
+                        ),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return 0
+        code = ensure_code(settings, rotate=bool(args.rotate))
+        username = owner.username
+
+    print(
+        json.dumps(
+            {
+                "status": "pending",
+                "username": username,
+                "code_file": str(code_path(settings)),
+                "code": code,
+                "url": bootstrap_url(settings, code),
+                "note": "口令设置成功后引导码文件会自动删除,该地址随即失效。",
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
+def cmd_reset_admin_password(args: argparse.Namespace, settings: Settings) -> int:
+    """给首位管理员直接设置新口令(口令彻底丢失时的救援通道)。
+
+    `--generate` 生成一枚一次性随机口令并把 `must_change_password` 置真
+    (登录后会被强制改密);不给 `--generate` 时交互式输入一个自己记得住的口令。
+    """
+    _prepare(settings)
+    from app.accounts import AccountError, owner_user, set_password
+    from app.bootstrap_access import clear_code, ensure_code, pending_owner
+
+    with session_scope() as session:
+        owner = owner_user(session)
+        if owner is None:  # pragma: no cover - 引导保证存在
+            print("数据库里没有任何账号", file=sys.stderr)
+            return 1
+        if args.generate:
+            password = secrets.token_urlsafe(12)
+            must_change = True
+        else:
+            password = args.password or getpass.getpass("请输入新的管理员口令:")
+            must_change = False
+        try:
+            set_password(session, owner, password, must_change=must_change)
+        except AccountError as exc:
+            print(";".join(exc.fields.values()), file=sys.stderr)
+            return 2
+        # 与新的 must_change_password 对齐:还需要改密 → 保住引导码;已定稿 → 删掉
+        if pending_owner(session) is not None:
+            ensure_code(settings)
+        else:
+            clear_code(settings)
+        payload: dict[str, object] = {
+            "username": owner.username,
+            "must_change": must_change,
+        }
+        if args.generate:
+            payload["generated_password"] = password
+
+    print(json.dumps(payload, ensure_ascii=False))
+    if args.generate:
+        print(
+            "\n上面的一次性口令只显示这一次;用它登录后必须立刻改成自己的口令。",
+            file=sys.stderr,
+        )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="app.cli", description="SisiCalendar 运维命令")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -182,6 +277,23 @@ def build_parser() -> argparse.ArgumentParser:
     hasher = sub.add_parser("hash-password", help="生成 Argon2id 口令哈希")
     hasher.add_argument("--password", default="", help="不推荐:会留在命令历史中")
     hasher.set_defaults(func=cmd_hash_password)
+
+    boot = sub.add_parser(
+        "bootstrap", help="查看/生成首位管理员的引导码与引导地址(初始口令救援)"
+    )
+    boot.add_argument(
+        "--rotate", action="store_true", help="重新生成引导码(旧码立即失效)"
+    )
+    boot.set_defaults(func=cmd_bootstrap)
+
+    reset = sub.add_parser(
+        "reset-admin-password", help="给首位管理员直接设置新口令(口令丢失时的救援)"
+    )
+    reset.add_argument("--password", default="", help="不推荐:会留在命令历史中")
+    reset.add_argument(
+        "--generate", action="store_true", help="生成一次性随机口令(登录后强制修改)"
+    )
+    reset.set_defaults(func=cmd_reset_admin_password)
 
     sub.add_parser("credential", help="查看管理员凭据来源").set_defaults(func=cmd_show_credential)
     return parser
