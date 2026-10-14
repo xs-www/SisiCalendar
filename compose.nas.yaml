@@ -1,0 +1,65 @@
+# NAS / Linux 上的「只拉取」部署文件:镜像来自 GHCR,不在本机构建。
+#
+# 与 compose.yaml 的运行时约束**逐字对齐**(端口只绑回环、非 root、资源上限、
+# 健康检查、日志轮转);唯一的区别是这里没有 build:,改用 image:。
+# 两者要一起改:compose.yaml 是本机开发路径,本文件是 NAS 生产路径。
+#
+# 用法:
+#   docker compose -f compose.nas.yaml pull
+#   docker compose -f compose.nas.yaml up -d
+# 升级与回滚见 docs/部署与运维.md §5.1 / §5.2(升级前必须先 app.cli backup)。
+
+services:
+  calendar:
+    # 钉版本:把 :latest 换成 :sha-<7位> 或 :1.2.3 可复现部署与回滚
+    image: ghcr.io/xs-www/sisicalendar:latest
+    container_name: sisi-calendar
+
+    # 端口只绑定 IPv4 回环地址。NAS 的 443 通常被管理界面或反向代理占用,
+    # 所以这里默认用 18443;按需改宿主端口,但**必须保留 127.0.0.1** ——
+    # 省略它会让 Docker 绑定 0.0.0.0,把管理界面暴露给整个局域网。
+    ports:
+      - "127.0.0.1:18443:8000"
+
+    volumes:
+      # /data 是唯一需要持久化和备份的应用数据目录。
+      # 必须放在 NAS 本地 ext4/Btrfs 卷上:SQLite 需要真实的文件锁,不要用 SMB/NFS。
+      - ./data:/data
+
+    env_file:
+      - .env
+
+    environment:
+      DATA_DIR: /data
+      HOST: 0.0.0.0
+      PORT: "8000"
+
+    restart: unless-stopped
+
+    # 与 compose.yaml 一致的保守资源上限;实测前不建议低于 256 MiB
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 64
+
+    # 容器停止时给正在进行的数据库事务与 ICS 原子替换留出时间
+    stop_grace_period: 30s
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=4).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+    security_opt:
+      - no-new-privileges:true
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
