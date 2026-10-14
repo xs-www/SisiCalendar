@@ -278,11 +278,19 @@
     `app/accounts.py::target_calendar_ids` 对不存在的账号返回空列表,等于给他们发空附件。
     只处理 `user_id IS NULL` 的行——该账号自己的账号收件人(`app/accounts.py:374`–`:377`)
     上面已经删掉了(见 `AGENTS.md` 不变量 21)。
+  - **发信任务里的「发起人」同样要清空**(2026-10-12 第二轮,`app/accounts.py:409`–`:414`):
+    把 `MailDelivery.actor_user_id == 该账号` 的行置空。理由与 `created_by_user_id` 完全相同
+    ——`mail_deliveries.actor_user_id` 是迁移 `0008` 加出来的列,**升级库里没有外键约束**,
+    不清就会留下指向已删除账号的悬空引用;邮件正文发信时会按它现查账号
+    (见 `docs/static/app-mailqueue.md::_actor_name`)。
+    **只清 id、保留 `actor_label` 快照**:任务若还没发出去,正文仍能说明当时是谁操作的。
   - 调用方(页面/API)必须另外保证**不会删掉最后一个管理员**、也不允许管理员删除自己。
 - **测试**:`tests/test_family_accounts.py::test_delete_user_removes_personal_calendar_but_keeps_shared_events`、
   `tests/test_family_pages.py::test_admin_cannot_disable_or_delete_self`、
   `::test_admin_deleting_member_keeps_last_admin`;
-  「把 `scope_user_id` 退回 `NULL`」这一段**暂无直接测试**
+  「把 `scope_user_id` 退回 `NULL`」这一段**暂无直接测试**;
+  「清空 `actor_user_id` 并保留快照」由
+  `tests/test_mail_actor.py::test_actor_is_frozen_with_the_task_and_survives_account_deletion` 覆盖
 
 ### `personal_calendar(session, user) -> Calendar`
 
@@ -541,7 +549,11 @@
     `user_id` 与 `scope_user_id` 都设成该账号,保留历史发送时间与未填的显示名),
     不新建第二条;
   - 否则新建或更新:新建时 `user_id` 与 `scope_user_id` 都指向该账号,
-    更新时刷新 `scope_user_id` 与邮箱(`:731`–`:748`)。
+    更新时刷新 `scope_user_id` 与邮箱(`:731`–`:748`);
+  - **账号启用时这行必须启用**(2026-10-12 第四轮,`app/accounts.py:737`/`:760`):账号邮箱是「范围内用户的已认证
+    邮箱」的唯一来源,设置页与 `/api/v1/sync-recipients` 只维护外部邮箱、不允许停用
+    账号行(409),所以这里顺手把被历史操作停用过的行恢复成 `enabled=True`
+    (账号本身已停用时不动——停用账号由 `sync_account_recipients` 负责停掉那行)。
 - **返回**:该账号的 `SyncRecipient`,或 `None`(无邮箱**或**邮箱未验证)
 - **副作用**:写/删 `sync_recipients` 并 `flush`(事务由调用方提交);
   账号名下多行时产生 `warning` 日志
@@ -549,7 +561,9 @@
   **一个账号最多一行账号收件人**(`user_id` 非空)是这段逻辑的存在理由;
   取行必须容忍重复,认不出时**只告警、不动行**,不得为了让 `scalar_one_or_none()` 成立而删除历史收件人;
   **未验证的账号绝不能成为收件人**——否则日程会发到一个还没确认归属的地址
-  (`AGENTS.md` 不变量 22);此函数幂等
+  (`AGENTS.md` 不变量 22);
+  **启用账号的账号收件人不得停留在停用状态**——它是派生数据,要停收信只能停用账号;
+  此函数幂等
 - **测试**:`tests/test_family_accounts.py::test_profile_update_syncs_mail_recipient`、
   `::test_account_recipient_claims_matching_external_row`、
   `tests/test_family_mail.py::test_account_and_external_recipients_coexist_and_are_idempotent`、
@@ -558,7 +572,36 @@
   (未验证时一行都不建;验证通过后同一账号立刻能建)、
   `tests/test_family_pages.py::test_recipient_partial_shows_scope`、
   `tests/test_family_upgrade_recipients.py::test_two_legacy_recipients_survive_repeated_bootstrap`、
-  `::test_bootstrap_recovers_from_duplicate_account_recipients`(被旧引导写坏的库反复启动不崩)
+  `::test_bootstrap_recovers_from_duplicate_account_recipients`(被旧引导写坏的库反复启动不崩)、
+  `tests/test_account_recipient_sync.py::test_publish_reactivates_a_disabled_account_recipient`
+
+### `sync_account_recipients(session) -> int`
+
+- **位置**:`app/accounts.py:783`(2026-10-12 第四轮新增)
+- **用途**:把**全部账号**的邮箱对齐成收件人记录,返回**发生变化的行数**
+  ——「按家庭可见范围向范围内用户的已认证邮箱同步」这条需求在领域层的落点
+- **规则**:
+  - 启用账号 → `sync_user_recipient(session, user)`:有邮箱且已验证就建/更新并恢复启用,
+    没邮箱/未验证就删掉该行;
+  - **停用账号** → 保留记录但置 `enabled=False`(停用账号不再收邮件,重新启用后自动恢复)。
+    刻意**不删行**:账号重新启用时不必重建,历史 `last_sent_at` 也留着
+- **返回**:前后快照(`id → (email, user_id, scope_user_id, enabled)`)的差异行数
+  (新建、删除、改邮箱、改范围、启停各算一次),调用方据此决定要不要提交
+- **副作用**:写/删 `sync_recipients` 并 `flush`(事务由调用方提交)
+- **不变量**:账号收件人是**派生结果**而不是用户数据——任何时候都能由
+  `users.email` + `users.enabled` + `email_verified_at` 重新算出来;
+  因此设置页/接口删除或停用它都不会真的改变收信集合,下一次对齐就回来了;
+  函数幂等,第二次调用返回 0
+- **调用方**:
+  - `app/bootstrap.py::ensure_family_setup`(启动时兜底修复,并据此置 `changed`);
+  - `app/mailqueue.py::ensure_delivery_tasks`(**建发信任务之前**对齐,保证范围内的家人
+    一定在收件人集合里,不依赖上一次启动是否成功);
+  - `app/routers/pages.py` 的 `/admin/settings` 与收件人片段(渲染前对齐,页面与邮件
+    队列看到的是同一份事实)
+- **测试**:`tests/test_account_recipient_sync.py::test_publish_restores_a_deleted_account_recipient`、
+  `::test_publish_reactivates_a_disabled_account_recipient`、
+  `::test_disabled_account_stops_receiving`、
+  `::test_bootstrap_repairs_and_commits_a_missing_account_recipient`
 
 ### `recipient_scope_user_id(recipient) -> str | None`
 
@@ -630,3 +673,10 @@
   `owner_user` 删掉「旧订阅地址 `/calendar` 绑首位管理员」的过期说法,
   测试名更正为 `tests/test_family_web.py::test_owner_fixed_address_serves_owner_scope_not_union`;
   本轮把**全文所有条目的源码行号**按当前文件重校(旧行号整体偏移 1–28 行不等)。
+- 2026-10-12(第四轮,用户反馈「共享日历变动没有同步到范围内用户的已认证邮箱」):
+  新增 `sync_account_recipients()` —— 账号收件人被明确定义为**账号资料的派生结果**
+  (启用 + 已验证 → 一条启用的账号收件人;账号停用 → 该行置 `enabled=False`),
+  返回变化行数供调用方决定要不要提交;`sync_user_recipient()` 增加
+  「账号启用时把该行恢复成启用」这一步。设置页与 `/api/v1/sync-recipients` 从此
+  只维护外部邮箱,账号行删不掉也停不掉(页面与接口都 409)。
+  测试见 `tests/test_account_recipient_sync.py`。

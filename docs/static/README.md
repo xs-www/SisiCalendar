@@ -30,6 +30,7 @@
 | [`migrations-0005.md`](migrations-0005.md) | `migrations/versions/0005_family_accounts.py`(家庭版结构变更) |
 | [`migrations-0006.md`](migrations-0006.md) | `migrations/versions/0006_recipient_scope.py`(收件人身份与范围拆分,修复重复绑定) |
 | [`migrations-0007.md`](migrations-0007.md) | `migrations/versions/0007_email_verification.py`(`users` 加 5 个邮箱验证状态列,老邮箱回填为已验证) |
+| [`migrations-0008.md`](migrations-0008.md) | `migrations/versions/0008_delivery_actor.py`(`mail_deliveries` 加 `actor_user_id`/`actor_label`,只加列不回填) |
 | [`app-bootstrap.md`](app-bootstrap.md) | `app/bootstrap.py`(家庭版数据引导 `ensure_family_setup`) |
 | [`app-config.md`](app-config.md) | `app/config.py`(派生路径 `feed_dir`、公开基地址与邮箱验证阈值) |
 | [`app-security.md`](app-security.md) | `app/security.py`(会话盐值 v2 与 `create_session`/`read_session`) |
@@ -62,8 +63,8 @@
 
 | 文档 | 源码 |
 |---|---|
-| [`app-sync-service.md`](app-sync-service.md) | `app/sync_service.py`(`publish` 的多目标编排) |
-| [`app-mailqueue.md`](app-mailqueue.md) | `app/mailqueue.py`(按收件人目标取附件与正文范围提示) |
+| [`app-sync-service.md`](app-sync-service.md) | `app/sync_service.py`(`publish` 的多目标编排与发起人参数) |
+| [`app-mailqueue.md`](app-mailqueue.md) | `app/mailqueue.py`(按收件人目标取附件、正文范围提示与「发起人」一行) |
 
 ### 路由、装配与模板
 
@@ -118,6 +119,25 @@
    `email_verify_expires_at`、`email_verify_attempts`、`email_verify_sent_at` 5 列,
    并给**已有非空邮箱**的账号回填 `email_verified_at = created_at`
    (否则老成员会被新闸门挡住);`downgrade()` 删列。见 [`migrations-0007.md`](migrations-0007.md)。
+7. **同步邮件标明操作发起人**(2026-10-12 第三轮):
+   `app/sync_service.py::publish` 新增 `actor_user_id` / `actor_label`,五个路由调用点传入
+   当前操作者(**不读** `event.created_by_user_id`,那是创建人不是操作人);
+   `app/mailqueue.py::_body_for` 只对新增/修改/删除日程写 `发起人:<显示名>`(手动同步不写),
+   名字由 `_actor_name` 现查账号显示名、查不到退回快照、都没有写「未记录」;
+   迁移 `0008_delivery_actor` 给 `mail_deliveries` 加两列(**只加列、不回填**),
+   删账号时由 `app/accounts.py::delete_user` 把 `actor_user_id` 显式置空、保留 `actor_label`。
+   见 [`app-mailqueue.md`](app-mailqueue.md)、[`app-sync-service.md`](app-sync-service.md)、
+   [`migrations-0008.md`](migrations-0008.md)。
+8. **账号收件人改为派生数据,设置页只维护外部邮箱**(2026-10-12 第四轮):
+   新增 `app/accounts.py::sync_account_recipients`,把「启用 + 已验证」的账号对齐成一条**启用**的
+   账号收件人(账号停用 → 该行停用但不删),在**启动引导、建发信任务之前、设置页渲染前**
+   三个时机调用;`app/sync_service.py::publish` 新增 `changed_calendar_ids`,
+   `app/mailqueue.py::ensure_delivery_tasks` 用 `_scope_calendar_ids()` 与它求交集,
+   **只给看得见这次改动的收件人建任务**(手动群发/CLI/后台修复不传 = 全员);
+   设置页 `/admin/partials/recipients` 的停用/移除与 `PATCH /api/v1/sync-recipients`
+   命中账号行一律 409,账号邮箱在页面下方只读列出。
+   见 [`app-accounts.md`](app-accounts.md)、[`app-mailqueue.md`](app-mailqueue.md)、
+   [`app-sync-service.md`](app-sync-service.md)、[`app-routers-pages.md`](app-routers-pages.md)。
 
 ## 与其它文档的分工
 

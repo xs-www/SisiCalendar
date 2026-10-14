@@ -41,32 +41,59 @@
 - **测试**:`tests/test_mail.py::test_agent_submitted_offset_reaches_the_mail_body`
   (走完整 Agent HTTP 链路,断言发信任务记录里的 `event_time_text`)
 
-### `publish(session, *, settings=None, change_type=..., event=None, event_title=None, time_text=None, force_new_version=False) -> SyncOutcome`
+### `publish(session, *, settings=None, change_type=..., event=None, event_title=None, time_text=None, actor_user_id=None, actor_label=None, changed_calendar_ids=None, force_new_version=False) -> SyncOutcome`
 
-- **位置**:`app/sync_service.py:126`
-- **签名未变**;`time_text` 这个既有参数被真正用起来了:
-  `app/routers/api_agent.py` 与 `app/routers/api_events.py`(新建/修改)现在都传
-  `time_text=input_time_text(event, payload.start_at, payload.end_at)`
-- **未传时的行为**:保持原样,按事件参照时区渲染(网页表单、手动同步、后台修复都走这条)
+- **位置**:`app/sync_service.py:128`
+- **签名变化**:
+  - 2026-10-12 第二轮新增 `actor_user_id` / `actor_label`;
+  - **2026-10-12 第四轮新增 `changed_calendar_ids`**(默认 `None`),老调用方不受影响
+- **`changed_calendar_ids`(本轮新增)**:这次改动落在哪些日历里
+  - **不给时按 `event.calendar_id` 推断**——具体日程的增删改都自带归属日历,
+    所以调用方即使不传也能得到正确范围;
+  - 事件在日历之间**移动**时两边都要通知,`app/routers/api_events.py` 的 PATCH
+    显式传 `[旧日历, 新日历]`;
+  - 手动群发(`regenerate` / `send_latest_to_enabled`)、CLI 导出与后台 `repair_if_needed`
+    既没有事件也没有日历,传空即「发给全部收件人」;
+  - 过滤动作发生在 `app/mailqueue.py::ensure_delivery_tasks`,
+    判定用的是收件人的可见日历集合(`_scope_calendar_ids`)
+- **未传时的行为**:`time_text` 按事件参照时区渲染;
+  `actor_*` 留空 → 发信任务不带发起人,正文写「未记录」(只有
+  **新增/修改/删除日程** 才会渲染那一行,见 `docs/static/app-mailqueue.md`)
+- **发起人语义(重要)**:**发起人是「谁在操作」,不是「事件是谁建的」**。
+  `publish` **不读** `event.created_by_user_id` 去猜 —— 那会把别人(例如被提升为
+  `editor` 的成员)的改动记到事件创建人头上。调用方必须显式传:
+  - `app/routers/api_events.py` 三处(新建/修改/删除)→ `current.user_id` / `current.label`;
+  - `app/routers/api_agent.py` → 令牌绑定账号的 `user.id` / `user.label`
+    (快捷指令与外部 Agent 都是替这个人写日程);
+  - `app/routers/api_sync.py` 与 `app/routers/pages.py` 的重新生成 / 群发 →
+    `admin.user_id` / `admin.label`(手动同步**不写**正文那一行,只落库备查);
+  - `app/cli.py`(恢复后重建、`export` 命令)与后台 `repair_if_needed` → 不传,
+    正文写「未记录」(确实是系统行为,没有操作人)
 - **家庭版(2026-10-08)的编排变化**——`publish` 自身不加参数,变化全在它调用的两步里:
   1. `export_calendar(...)` 现在一次产出并集文件 + **每个订阅目标的发布文件与快照**
      (见 `docs/static/app-exporter.md`);返回的 `result.version` 与 `result.changed`
      语义不变,`result.targets` 列出本次的目标键
   2. 只有在 `result.changed` 为真时才 `ensure_delivery_tasks(...)`,而它现在
      **按收件人范围逐目标**选附件:账号收件人拿「他可见日历里尚未结束的日程」,
-     外部邮箱拿「家庭共享日历里尚未结束的日程」(见 `docs/static/app-mailqueue.md`)
+     外部邮箱拿「家庭共享日历里尚未结束的日程」(见 `docs/static/app-mailqueue.md`),
+     并把发起人固化进任务记录
 - **不变量**:
   - 调用前调用方必须已经提交过一次事务(事件已落库、`dirty` 已置位),
     这样即便导出失败,用户的编辑也不会丢失
   - **版本号仍由全库并集决定**:任何一个成员改动自己的私人日历,都会推进全局
     `export_version`,并让所有目标重新落盘;各目标内容不同但版本号相同
-  - `changed=False` 时不建任务:同一版本对同一收件人的任务早已存在(幂等键不变)
+  - `changed=False` 时不建任务:同一版本对同一收件人的任务早已存在(幂等键不变),
+    发起人也不会被后来的操作覆盖
   - 邮件或文件问题**不得**影响日程保存:`ExportError` 与其它异常都走
     `_persist_failure` + 回滚,返回 `SyncOutcome(ok=False, ...)`
+  - 发起人只进任务记录与邮件正文,**不进日志**(日志里只允许出现账号用户名,见
+    `AGENTS.md` 第 7 条的口径)
 - **测试**:`tests/test_family_mail.py::test_account_and_external_recipients_coexist_and_are_idempotent`
   (直接调 `publish` 后用同版本再调 `ensure_delivery_tasks` 断言返回 0)、
   `::test_external_recipient_only_gets_family_calendar`、
-  `::test_feed_files_exist_for_every_target_after_export`
+  `::test_feed_files_exist_for_every_target_after_export`、
+  `tests/test_mail_actor.py::test_member_edit_mail_names_the_member_display_name`
+  (管理员建、成员改 → 发起人是成员,不是创建人)
 
 ## 影响面
 
@@ -84,3 +111,14 @@
   参数;邮件正文改按调用方提交的偏移量表述,事件参照时区不变。
 - 2026-10-08:家庭版多目标编排归档 —— `publish` 签名不变,但 `export_calendar` 产出全部
   订阅目标、`ensure_delivery_tasks` 按收件人范围取附件;版本号仍由并集决定。
+- 2026-10-12(第二轮):`publish` 新增 `actor_user_id` / `actor_label`,并**明确不读**
+  `event.created_by_user_id`(那是创建人,不是操作人);五个调用点
+  (`api_events` × 3、`api_agent`、`api_sync` / `pages` 的手动动作)各自传入当前操作者,
+  CLI 与后台修复不传。`overview()` 的 `recent_deliveries` 同步多返回 `actor_label`
+  (接口契约见 `docs/static/app-routers-api-settings.md`)。
+- 2026-10-12(第二轮,同日):`ensure_delivery_tasks` 调用处补传 `actor_label`,
+  发起人在**建任务那一刻**固化;同版本重试沿用该记录,不会被后来的操作改写。
+- 2026-10-12(第四轮,用户反馈「共享日历变动没有同步到范围内用户的已认证邮箱」):
+  `publish` 新增 `changed_calendar_ids`,不给时按 `event.calendar_id` 推断,
+  PATCH 换日历的场景由调用方显式传新旧两个 id;由此**只有看得见这次改动的收件人**
+  才会收到邮件。手动群发 / CLI / 后台修复不传,行为与从前一致(发给全部收件人)。

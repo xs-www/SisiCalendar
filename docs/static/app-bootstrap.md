@@ -39,10 +39,14 @@
   4. **没有共享日历时**(`app/bootstrap.py:119`–`:127`):建一条
      `DEFAULT_FAMILY_CALENDAR_NAME`,颜色取 `DEFAULT_USER_COLORS[1]`,首位管理员为 `owner`,
      其余现有成员为 `viewer`(见 `app/accounts.py::create_shared_calendar`)。
-  5. `app/bootstrap.py:129`–`:132`:逐个账号补齐——`personal_calendar`(缺则建)、
-     `join_shared_calendars`(缺则补 `viewer` 成员关系)、`sync_user_recipient`(有邮箱则建/更新
-     账号收件人,没邮箱则确保没有收件人记录)。首位管理员初始 `email=None`,
+  5. `app/bootstrap.py:129`–`:136`:逐个账号补齐——`personal_calendar`(缺则建)、
+     `join_shared_calendars`(缺则补 `viewer` 成员关系)、`ensure_account_feed_token`
+     (缺则登记该账号的固定订阅地址,新建则置 `changed`)。首位管理员初始 `email=None`,
      所以首次升级通常**不会**产生他的账号收件人记录。
+  5b. `app/bootstrap.py:138`–`:141`(2026-10-12 第四轮):再调一次
+     `app/accounts.py::sync_account_recipients`,把全部账号的邮箱对齐成收件人记录
+     (启用 + 已验证 → 一条启用的账号收件人;停用 → 该行置 `enabled=False`),
+     返回变化行数并据此置 `changed`。这是「范围内用户的已认证邮箱」在启动时的兜底修复。
   6. `app/bootstrap.py:135`–`:145`:**历史事件回填**——把 `Event.calendar_id IS NULL` 的行全部挂到
      首位管理员的私人日历(`calendar_id = owner 私人日历 id`),`created_by_user_id` 为空时补成
      首位管理员;条数写 info 日志。
@@ -53,17 +57,22 @@
        ——升级后才新建的外部邮箱只收家庭共享日历;
      - 把历史 `AgentToken.user_id IS NULL` 的令牌补成首位管理员并刷新 `updated_at`
        (`app/bootstrap.py:168`–`:173`)。
-  8. `app/bootstrap.py:175`–`:177`:只要 `changed` 为真,调
-     `app/exporter.py::mark_dirty` 并 `session.commit()`,让订阅端与邮件目标跟上新的范围。
+  8. `app/bootstrap.py:175`–`:180`:只要 `changed` 为真,调
+     `app/exporter.py::mark_dirty`;随后**无条件 `session.commit()`**(2026-10-12 第四轮改动)
+     ——逐项修复各自会 `flush`,只看 `changed` 标记会漏判(漏标的修复会被调用方静默回滚),
+     引导的语义本来就是「跑完即提交」。
 - **返回**:`None`(无返回值;失败抛 `RuntimeError`)
-- **副作用**:写账号/日历/成员/收件人/事件/令牌行;`changed` 时标记导出 dirty 并提交事务;
-  产生 `warning`(新建首位管理员)与 `info`(新建共享日历、回填条数)日志
+- **副作用**:写账号/日历/成员/收件人/事件/令牌行;`changed` 时标记导出 dirty;
+  **总会提交一次事务**;产生 `warning`(新建首位管理员)与 `info`(新建共享日历、回填条数)日志
 - **不变量(幂等)**:
   - 第二次运行的 `first_upgrade` 为 `False`,因此**不会**再改绑历史收件人与历史令牌,
     也不会重复建账号、私人日历或共享日历;
   - 已有成员关系与已有日历颜色、排序一律不动;
   - 已经在某条日历里的事件不会被再次搬运;`calendar_id` 非空的事件不受影响;
   - `must_change_password` 只在创建首位管理员时按「本轮是否新生成口令」决定;
+  - **每一次修复都必须落库**:结尾无条件 `session.commit()`。早先只在 `changed` 为真时
+    提交,而 `changed` 只覆盖结构性回填;账号收件人、固定订阅地址这类「漏标就丢」的
+    修复会只留在内存里(2026-10-12 第四轮改掉,并补了跨会话断言);
   - **首次升级只写 `scope_user_id`,绝不写 `user_id`**:`user_id` 是「账号收件人」的身份标记,
     每个账号只能有一行。旧版本把**每一个**历史外部收件人都写成
     `user_id = 首位管理员`,于是同一账号名下出现多行;第二次启动时
@@ -73,7 +82,8 @@
     `AGENTS.md` 不变量 21);
   - 被旧引导写坏的库(`user_id` 重复)不需要删除任何行:`0006` 迁移会把多余行降级,
     `sync_user_recipient` 也会容忍重复(告警 + 按 `users.email` 匹配 + 认不出就不动);
-  - **已知的例外**:第 5 步对已有账号收件人会刷新 `sync_recipients.updated_at`
+  - **已知的例外**:第 5 步对已有账号收件人会刷新 `sync_recipients.updated_at`,
+    也会对已有固定订阅地址刷新 `feed_tokens.updated_at`
     (收件范围与邮件幂等键 `(export_version, recipient_id)` 不受影响)。所以「无副作用」是
     指不产生新的业务归属变更,而不是行级完全零写入。
 - **测试**:
@@ -91,6 +101,8 @@
     (两个历史收件人、连跑三次引导都不崩,`user_id` 仍为空、范围仍是首位管理员)
   - `tests/test_family_upgrade_recipients.py::test_bootstrap_recovers_from_duplicate_account_recipients`
     (被旧引导写坏的多行绑定库也能启动)
+  - `tests/test_account_recipient_sync.py::test_bootstrap_repairs_and_commits_a_missing_account_recipient`
+    (删掉账号收件人后跑引导:修复必须**落库**,另一个会话要能看见)
 
 ## 变更
 
@@ -120,3 +132,7 @@
   并写明这正是修复「同一账号名下多行 → 第二次启动 `MultipleResultsFound` → 容器重启循环」
   的关键;补上 `tests/test_family_upgrade_recipients.py` 的两个回归用例;
   顺带订正全文的源码行号(部分旧行号在本轮之前就已过期)。
+- 2026-10-12(第四轮):逐账号的 `sync_user_recipient` 换成一次
+  `sync_account_recipients`(账号收件人 = 账号资料的派生结果,停用账号那一行会被停掉);
+  结尾改成**无条件提交**,并在不变量里写明「漏标 `changed` 会让修复被静默回滚」;
+  「已知的例外」补上固定订阅地址的 `updated_at`。

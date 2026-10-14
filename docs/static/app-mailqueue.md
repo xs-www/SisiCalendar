@@ -1,7 +1,8 @@
 # `app/mailqueue.py`
 
 持久化发信队列。家庭版(2026-10)的变更集中在**按收件人目标取附件**与**正文范围提示**;
-队列语义(幂等、退避、重试)未变。
+队列语义(幂等、退避、重试)未变。**2026-10-12 第二轮**追加「发起人」:正文与任务记录里
+标明**这次操作是谁发起的**。
 
 ## 函数
 
@@ -29,9 +30,20 @@
   `::test_legacy_external_recipient_keeps_owner_scope_attachment`(范围由 `scope_user_id`
   决定的历史外部邮箱拿到首位管理员的可见范围快照)
 
+### `_scope_calendar_ids(session, recipient, cache) -> set[str]`
+
+- **位置**:`app/mailqueue.py:111`(2026-10-12 第四轮新增)
+- **用途**:这位收件人**能看见的日历集合**,用于判断「这次改动要不要通知他」
+- **规则**:`recipient_scope_user_id(recipient)` 非空 → `target_calendar_ids(user_id=…)`
+  (该账号可见范围);为空 → `family_calendar_ids(session)`(家庭共享日历)。
+  与附件目标用的是**同一套范围判定**,不会出现「按 A 判断要不要发、按 B 取附件」
+- **参数**:`cache` 是 `scope_user_id → 日历集合` 的缓存,同一批收件人只查一次库
+- **副作用**:读库(不改动)
+- **不变量**:范围判定只能来自 `app/accounts.py` 的那两个函数,**不得**在这里另写一套
+
 ### `ensure_delivery_tasks(session, *, export_version, ...) -> int`
 
-- **位置**:`app/mailqueue.py:105`
+- **位置**:`app/mailqueue.py:130`
 - **本次变更**:任务的 `snapshot_path` / `attachment_hash` 不再直接取 `CalendarExport`
   的两个字段,而是**按收件人范围**逐目标决定
   - 目标键:`feed_target_key(user_id=recipient_scope_user_id(recipient))`
@@ -43,14 +55,66 @@
     但 `scope_user_id` 仍指向首位管理员,只看 `user_id` 会把它们的范围错判成家庭共享
   - 同一目标只算一次:循环内用 `sources: dict[key, (path, hash)]` 缓存,
     多个收件人共用同一个目标时不会重复读文件
+- **按可见范围筛选收件人(2026-10-12 第四轮新增)**:新增关键字参数
+  `changed_calendar_ids`
+  - 传了非空集合 → 只有 `_scope_calendar_ids(...)` 与它**有交集**的收件人才建任务;
+    看不见这次改动的收件人直接跳过(否则他会收到一封附件里根本没有这条日程的邮件),
+    跳过数量写进 info 日志;
+  - 不传 / 传空 → **不筛选**(手动群发、CLI 导出、后台修复拿不到具体日历);
+  - `app/sync_service.py::publish` 在没显式给集合时会按 `event.calendar_id` 推断,
+    所以「具体日程的增删改」天然带范围;事件在日历之间移动时调用方要把新旧两边都传进来
+- **建任务前对齐账号收件人(2026-10-12 第四轮新增)**:先调
+  `app/accounts.py::sync_account_recipients(session)` 一次。账号邮箱是「范围内用户的
+  已认证邮箱」的唯一来源,但历史库里那行可能被人删掉或停用过;这里在**发信前**重新对齐,
+  保证「范围内的家人」一定在收件人集合里,而不是只依赖上一次启动是否修复成功
+- **发起人(2026-10-12 第二轮新增)**:新增两个关键字参数
+  - `actor_user_id`:发起操作的账号 id。发信时用它现查账号,显示名以**那一刻**为准;
+  - `actor_label`:发起人显示名的**快照**,账号删除后仍能说明当时是谁;
+  - 落库时 `actor_label` 先 `strip()` 再截断到 100 字符(`snapshot_label`),两侧都为空
+    则写 `None`。历史任务、后台修复与 CLI 导出传空值,正文显示「未记录」;
+  - **默认值都是 `None`**,现有调用方不需要改动即可继续工作
 - **不变量**(全部未变):幂等键仍是 `(export_version, recipient_id)`;
   同一版本对同一收件人只建一个任务;SMTP 未配置或没有启用收件人时返回 0
 - **调用方**:`app/sync_service.py::publish`(保存链路)、
-  `app/mailqueue.py::send_latest_to_enabled`(设置页「向当前人员发送最新版」)
+  `app/mailqueue.py::send_latest_to_enabled`(设置页「向当前人员发送最新版」,不带筛选)
 - **测试**:`tests/test_mail.py::test_task_creation_is_idempotent`、
   `::test_attachment_falls_back_to_version_snapshot`、
   `tests/test_family_mail.py::test_account_and_external_recipients_coexist_and_are_idempotent`、
-  `::test_legacy_external_recipient_keeps_owner_scope_attachment`(目标键按范围账号选取)
+  `::test_legacy_external_recipient_keeps_owner_scope_attachment`(目标键按范围账号选取)、
+  `tests/test_mail_actor.py::test_actor_is_frozen_with_the_task_and_survives_account_deletion`、
+  `tests/test_account_recipient_sync.py::test_shared_calendar_change_mails_every_in_scope_verified_account`、
+  `::test_personal_calendar_change_skips_out_of_scope_recipients`、
+  `::test_multiple_changed_calendars_notify_every_affected_scope`、
+  `::test_manual_sync_ignores_the_scope_filter`(手动群发不带筛选取全部)、
+  `::test_explicit_calendar_filter_still_applies_to_manual_calls`(显式给日历集合时严格筛选)、
+  `::test_publish_restores_a_deleted_account_recipient`(发信前对齐账号收件人)
+
+### `_actor_name(session, delivery) -> str | None`
+
+- **位置**:`app/mailqueue.py:202`
+- **用途**:邮件正文与队列里「发起人」那一行要用的名字,认不出返回 `None`
+- **取值顺序**:
+  1. `delivery.actor_user_id` 非空 → `app/accounts.py::get_user` 现查账号,取
+     `user.label`(`display_name or username`)——**界面改了显示名,还没发出去的邮件也跟着变**;
+  2. 查不到(账号已删除)或 `actor_user_id` 为空 → 退回任务记录里的 `actor_label` 快照;
+  3. 两者都为空 → `None`,调用方渲染成「未记录」。
+- **为什么要有快照兜底**:`AGENTS.md` 不变量 20 要求删账号时在应用层清空归属,
+  `app/accounts.py::delete_user` 会把 `MailDelivery.actor_user_id` 显式置空;
+  这时只剩快照能说明「当时是谁操作的」。若两个字段都没有(升级前的历史任务),
+  宁可写「未记录」也不编造名字。
+- **不变量**:返回的名字**只**来自账号显示名或快照,绝不去猜事件上的
+  `created_by_user_id`(那是「谁建的」,不是「谁改的」);返回值不写日志(只进邮件正文)
+- **副作用**:读 `users` 表(不改动)
+- **测试**:`tests/test_mail_actor.py::test_actor_name_follows_the_current_display_name`、
+  `::test_actor_is_frozen_with_the_task_and_survives_account_deletion`、
+  `::test_legacy_task_without_actor_says_unrecorded`
+
+### `_subject_for(...) -> str`(主题文案)
+
+- **位置**:`app/mailqueue.py:189`
+- **本次未改**:主题仍是「日程已更新:{title}」「日程已移除:{title}」「日历快照:{calendar}」。
+  **发起人只出现在正文与队列里,不改进主题**——邮件列表页一屏多封时,主题保持稳定更易扫读
+- **不变量**:主题里不得出现收件人地址、订阅地址或别人的名字
 
 ### `_scope_hints(recipient, *, settings, session) -> tuple[str, str]`
 
@@ -88,7 +152,7 @@
 
 ### `_body_for(...) -> str`(正文文案)
 
-- **位置**:`app/mailqueue.py:194`
+- **位置**:`app/mailqueue.py:221`
 - **本次变更**:参数 `subscription_url` 由两个参数取代——
   `scope_label`(附件范围)与 `subscription_hint`(订阅地址或空串)
   - 附件说明改为「附件 calendar.ics 是**{scope_label}**里尚未结束的日程快照……已经结束的
@@ -98,11 +162,23 @@
     `你的固定订阅地址(长期有效,需要 Tailscale):<地址>`;
     为空 → 「长期订阅地址:每位家庭成员都有自己的固定地址(每人一条、只在本人界面显示),
     主人可以在日历管理界面「我的订阅地址」里查看。」
+- **2026-10-12 第二轮变更(发起人一行)**:新增可选参数 `actor_label`
+  - 只在 `delivery.change_type in (CHANGE_CREATED, CHANGE_UPDATED, CHANGE_DELETED)` 时
+    追加一行 `发起人:{actor_label or '未记录'}`,位置紧跟在 `本次操作:{action}` 之后
+    (`app/mailqueue.py:247`);
+  - **手动同步(`CHANGE_MANUAL`)不写这一行**:「向当前人员发送最新版」「重新生成 ICS」
+    是管理员主动群发,收件人关心的是日历本身,说成「某某操作的」没有意义;
+    取不到发起人时也不会写「未记录」——不存在的操作人无从谈起
+  - 名字由 `attempt_delivery` 用 `_actor_name(session, delivery)` 算好后传入,
+    **正文里的名字是发信那一刻的账号显示名**(与队列里的快照可能不同,这是有意的)
 - **不变量**:正文仍包含本次操作类型、事件标题、事件时间、日历生成时间(UTC)、订阅地址段;
-  **不再出现并集订阅地址,也不出现旧 `SUBSCRIPTION_URL`**;文案由
+  **不再出现并集订阅地址,也不出现旧 `SUBSCRIPTION_URL`**;发起人一行**不得**成为
+  「谁建的日程」的同义词(见 `_actor_name`);文案由
   `tests/test_mail.py::test_each_recipient_gets_separate_message_with_future_attachment`
   (`长期订阅地址`、`尚未结束的日程`、`完整历史(含过去事件)`、正文里没有 `sisi_feed_`)与
-  `tests/test_mail_smtp.py::test_real_smtp_conversation` 断言关键短语
+  `tests/test_mail_smtp.py::test_real_smtp_conversation` 断言关键短语;
+  发起人相关的四条断言见 `tests/test_mail_actor.py`
+  (`发起人:家庭管理员`、`发起人:思思`、`发起人:未记录`、手动同步正文里 `发起人` 不出现)
 - **2026-10-12 订正**:「已结束的日程不在附件里」这句旧措辞已经不存在了 —— 现在的说法是
   「附件是**<范围>**里尚未结束的日程快照。**完整历史(含过去事件)始终可以从长期订阅地址
   获得**。」测试里对应的断言也从 `已经结束的日程不在附件里` 改为
@@ -118,7 +194,15 @@
 - 每个版本的快照是一整套:`calendar-v{N}.ics`(并集,内部)、
   `calendar-v{N}-<目标键>.ics` 与 `calendar-v{N}-<目标键>-upcoming.ics`。
   `cleanup_snapshots` 按版本前缀一次清干净,见 `docs/static/app-exporter.md`。
-- `templates/partials/sync_status.html` 的二次确认文案同步改为「尚未结束的日程快照」。
+- `templates/partials/sync_status.html` 的二次确认文案同步改为「尚未结束的日程快照」;
+  表格在 2026-10-12 第二轮增列「发起人」(`delivery.actor_label`,历史任务显示 `—`),
+  见 `docs/static/templates.md`。
+- 「发起人」把「发信时的名字」与「任务里的快照」分开了:邮件正文用 `actor_user_id`
+  现查账号(改名立刻生效),队列用 `actor_label` 快照(还原当时是谁)。两个口径都只
+  出现在给收件人与管理员的产物里,不进日志。
+- **收件人集合本身也是派生的**(2026-10-12 第四轮):账号邮箱来自 `users`,
+  外部邮箱来自 `sync_recipients` 里 `user_id IS NULL` 的行。前者的增删改都由
+  `sync_account_recipients` 自动维护,设置页只碰后者。
 
 ## 变更记录
 
@@ -145,3 +229,17 @@
   与 `::test_member_recipient_gets_only_his_own_address`(旧名
   `test_owner_recipient_may_reuse_legacy_subscription_url` /
   `test_member_recipient_never_sees_legacy_url` 已不再存在)。
+- 2026-10-12(第二轮,用户反馈「同步邮件看不出是谁改的」):新增**发起人**。
+  `ensure_delivery_tasks` 收 `actor_user_id` / `actor_label` 并落库(迁移 `0008`);
+  新增 `_actor_name`(现查账号 → 快照兜底 → `None`);
+  `_body_for` 新增 `actor_label` 参数,**只在新增/修改/删除日程**时写一行
+  `发起人:…`,手动同步不写、也从不写「未记录」;
+  `send_latest_to_enabled` 透传两个参数(手动同步也记录操作者,供队列显示);
+  `app/accounts.py::delete_user` 显式把 `MailDelivery.actor_user_id` 置空(不变量 20 的同一理由)。
+  测试新增 `tests/test_mail_actor.py`(10 项)。
+- 2026-10-12(第四轮,用户反馈「共享日历变动没有同步到范围内用户的已认证邮箱」):
+  `ensure_delivery_tasks` 新增 `changed_calendar_ids` 与 `_scope_calendar_ids()` ——
+  只给「可见范围包含这次改动的日历」的收件人建任务;不传即不筛选(手动群发/CLI/后台修复)。
+  建任务之前先调 `app/accounts.py::sync_account_recipients()` 对齐账号收件人,
+  让「范围内的家人」不再依赖上一次启动是否修复成功。
+  测试新增 `tests/test_account_recipient_sync.py`(14 项)。

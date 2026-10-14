@@ -30,7 +30,7 @@ templates/
    ├─ feeds.html              个人订阅令牌:固定地址 + 一次性临时明文
    ├─ family_feeds.html       家庭订阅令牌(管理员)
    ├─ members.html            邀请码 / 账号 / 共享日历与权限
-   ├─ recipients.html         邮件收件人(账号收件人 / 历史绑定 / 家庭共享三种范围)
+   ├─ recipients.html         外部收件人(可维护)+ 账号邮箱(只读,自动同步)
    ├─ tokens.html             远程接入令牌
    ├─ settings_form.html      全局设置
    ├─ sync_status.html        版本与邮件队列(含公开面基地址)
@@ -156,7 +156,8 @@ templates/
   - **发送时间**:`delivery.sent_at`,未发送显示 `—`
   - 「下次重试」由 `strftime` 改为同一套 `localtime` 过滤器,三个时间列显示口径一致
   - 表格上方 `<p class="hint">` 注明「操作时间为任务创建时刻;时间均按日历默认时区 X 显示」
-- **列顺序**:版本 / 收件人 / 类型 / 状态 / 尝试 / 操作时间 / 发送时间 / 下次重试 / 错误 / 操作
+- **列顺序**(2026-10-12 起):版本 / 收件人 / 类型 / **发起人** / 状态 / 尝试 / 操作时间 /
+  发送时间 / 下次重试 / 错误 / 操作
 - **上下文**:`deliveries`、`default_timezone`(新增)、`sync_state`、`status_labels`、`change_labels`、`csrf_token`
 - **过滤器**:`localtime`(见 `docs/static/app-deps.md`)
 - **测试**:`test_mail_queue_shows_operation_and_sent_time`
@@ -171,6 +172,20 @@ templates/
   (该键在 `app/schemas.py::SyncStatusRead` 里被重命名为 `public_base_url`,
   见 `docs/static/app-schemas.md`);其余九行(版本 / 生成时间 / 内容哈希 / 文件大小 /
   发布文件 / SMTP / 收件人 / 上次成功发送)未变
+- **2026-10-12 第二轮变更(发起人列)**:
+  - 表头「类型」之后插入 `<th>发起人</th>`,单元格为
+    `<td>{{ delivery.actor_label or '—' }}</td>`(`templates/partials/sync_status.html:66`)
+  - 数据直接取 `MailDelivery` ORM 对象(`app/routers/pages.py::_deliveries` 返回的就是模型行),
+    所以模板里读的是**快照字段** `actor_label`,而不是发信时现查的显示名 —— 队列要还原
+    「当时是谁操作的」,发信正文才用现查的名字,两者口径不同是有意的
+  - **手动同步显示 `—`**:`CHANGE_MANUAL` 的任务不写发起人正文那一行,但队列里仍会记录
+    操作者(备查),这里不区分类型,一律显示记录值
+  - **历史任务显示 `—`**:升级前建立的任务 `actor_label` 为空
+  - `<p class="hint">` 增补一句「「发起人」是触发这次变更的账号(手动同步不显示)」
+  - **不变量**:不得渲染出 `None`(用 `or '—'` 兜底),有
+    `tests/test_mail_actor.py::test_queue_page_renders_legacy_tasks_without_an_actor` 守着
+  - **测试**:`tests/test_mail_actor.py::test_queue_page_and_api_expose_the_actor`、
+    `::test_queue_page_renders_legacy_tasks_without_an_actor`
 
 ## `templates/partials/tokens.html`
 
@@ -327,11 +342,25 @@ templates/
     (用户名查不到时退回「成员」)——这是单用户版升级上来的历史外部邮箱;
   - 否则 → `家庭共享日历` 胶囊。
 - **上下文**:`recipients`、`users`、`csrf_token`、`default_timezone`、
-  `mail_configured`、`notice`、`error`(**未变**;三种范围都由 `recipients` 行自身的
-  `user_id` / `scope_user_id` 判定,不需要额外上下文键)
+  `mail_configured`、`notice`、`error`
+- **变更(2026-10-12 第四轮:设置里的同步邮箱收敛到外部邮箱)**:
+  - `recipients` 只包含**外部收件人**(`user_id IS NULL`),上面那张可操作的表格
+    只剩外部邮箱;账号邮箱不再出现 toggle/delete 表单;
+  - 上下文**新增 `account_recipients`**(`[{user, email, verified, deliverable, status}]`):
+    表格下方多一段只读的「账号邮箱(自动同步,不能在这里增删)」,
+    列为「成员 / 邮箱 / 收信范围 / 状态」,状态文案来自
+    `app/routers/pages.py::_account_recipient_entries`
+    (`自动同步中` / `邮箱待验证` / `未填邮箱` / `账号已停用,不收信`),
+    `deliverable` 为假时整行套 `muted-row`;
+  - 「范围」列的三种文案现在只会落到**历史绑定的外部邮箱**上
+    (`scope_user_id` 非空)→ `沿用{用户名}的可见日历` + `历史绑定`;
+  - 顶部提示改写为「这里只管理**外部邮箱**……账号邮箱通过验证后自动成为收件人,
+    要停止某个账号收信请到成员页停用该账号」
+  - 空态文案改为「还没有外部收件人。要给没有账号的家人发日历,在上面填一个邮箱即可。」
 - **测试**:`tests/test_family_pages.py::test_recipient_partial_shows_scope`
   (只断言 `本人可见日历` 与 `家庭共享日历` 两种文案);
-  「沿用某成员的可见日历 + 历史绑定」这一支**暂无直接测试**
+  `tests/test_account_recipient_sync.py::test_recipients_partial_lists_account_mail_as_read_only`
+  (账号邮箱在只读列表里可见、`自动同步中` 出现、页面里**没有**该行的 toggle/delete 地址)
 
 ## `templates/settings.html`
 
@@ -340,8 +369,12 @@ templates/
     外部邮箱只收家庭共享日历范围」
   - 新增「家庭订阅地址」卡片,`{% include "partials/family_feeds.html" %}`
   - 「远程接入令牌」卡片提示补充「每枚令牌绑定一个账号与可写日历」
-- **上下文**:`overrides`、`recipients`、`tokens`、`family_feed_tokens`、`users`、
-  `shared_calendars`、`default_owner`、`smtp`、时区候选(见 `docs/static/app-routers-pages.md`)
+- **上下文**:`overrides`、`recipients`、`account_recipients`、`tokens`、
+  `family_feed_tokens`、`users`、`shared_calendars`、`default_owner`、`smtp`、时区候选
+  (见 `docs/static/app-routers-pages.md`)
+- **变更(2026-10-12 第四轮)**:「邮件收件人」卡片右上角胶囊由「按范围分别发送」改为
+  「这里只加外部邮箱」,提示改写为「**账号邮箱是自动的**……这张卡片管理的是**外部邮箱**
+  ——只收家庭共享日历范围」
 - **测试**:`tests/test_agent_tokens.py::test_settings_page_carries_the_token_card`、
   `tests/test_family_pages.py::test_admin_pages_render`
 
@@ -483,6 +516,11 @@ templates/
   `partials/feeds.html` 增加固定地址卡片与「固定」chip(操作列改成一句提示,不渲染停用/撤销);
   `partials/me.html` 增加验证状态块;`partials/members.html` 的邀请链接改用
   `new_invite_url`;`partials/sync_status.html` 的公开面一行改用 `sync_state.public_base_url`
+- 2026-10-12(第四轮):`partials/recipients.html` 拆成「外部邮箱(可维护)」与
+  「账号邮箱(只读,自动同步)」两段,上下文新增 `account_recipients`;
+  `settings.html` 的收件人卡片文案与胶囊改写;`partials/sync_status.html` 的
+  「邮件收件人」一行补注「账号邮箱自动 + 外部邮箱」。
+  测试:`tests/test_account_recipient_sync.py::test_recipients_partial_lists_account_mail_as_read_only`。
   (**模板里已无 `subscription_url`**);新增「前端协作:公开前缀与 `data-base-path`」与
   「测试缺口」两节。测试名同步为
   `test_my_feed_is_stable_and_temporary_token_shown_once` 与

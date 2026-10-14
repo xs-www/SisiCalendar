@@ -138,8 +138,9 @@ app/
     外部邮箱(含历史邮箱)一条地址都不给,只提示地址在各自账号的「我的设置」里,
     并集地址与旧 `SUBSCRIPTION_URL` 已经彻底取消。见 `tests/test_family_mail.py`。
 17. **账号邮箱只能通过账号资料维护**:`users.email` 是账号收件人的唯一来源,外部收件人接口
-    拒绝改名/删除账号行(409);清空账号邮箱会删除对应收件人。见
-    `tests/test_family_web.py`、`tests/test_family_pages.py`。
+    拒绝改名、启停或删除账号行(409);清空账号邮箱会删除对应收件人,停用账号会停掉该行
+    (重新启用账号即自动恢复)。见 `tests/test_family_web.py`、`tests/test_family_pages.py`、
+    `tests/test_account_recipient_sync.py`。
 18. **邀请码与订阅令牌同样只存 `sha256`**:明文只在创建响应里出现一次,列表与页面只显示指纹;
     邀请码用尽/停用/过期后不可再注册(`unusable_reason` 先判次数再判停用),
     订阅令牌撤销后地址立刻 404。见 `tests/test_family_accounts.py`。
@@ -173,6 +174,24 @@ app/
     (同时让所有验证码哈希失效),这是刻意的取舍:密钥即身份。
     见 `tests/test_family_accounts.py::test_account_feed_token_is_stable_and_derived`、
     `tests/test_family_pages.py::test_fixed_address_cannot_be_disabled_or_revoked`。
+24. **账号收件人是派生数据,「设置里的同步邮箱」只碰外部邮箱**:
+    `sync_recipients` 里 `user_id` 非空的行完全由
+    `users.email` + `users.enabled` + `email_verified_at` 决定,由
+    `app/accounts.py::sync_account_recipients()` 对齐(启用且已验证 → 一条**启用**的账号收件人;
+    账号停用 → 该行 `enabled=False`,不删行)。它必须在**三个时机**被调用:启动引导、
+    **建发信任务之前**(`app/mailqueue.py::ensure_delivery_tasks`,不依赖上一次启动是否修好)、
+    以及设置页渲染前。设置页(`/admin/partials/recipients` 的 toggle/delete)与
+    `/api/v1/sync-recipients` 的写操作只允许作用于外部邮箱,**命中账号行一律 409**
+    (页面此前没有守卫,管理员能把成员的账号收件人删掉/停用,成员就再也收不到同步邮件)。
+    要停止某个账号收信,唯一做法是停用该账号。见 `tests/test_account_recipient_sync.py`。
+25. **一次改动只通知「看得见它」的收件人**:具体日程的增删改会把改动落在的日历
+    (`changed_calendar_ids`,PATCH 换日历时是**新旧两条**)交给
+    `app/sync_service.py::publish` → `ensure_delivery_tasks`;后者用
+    `_scope_calendar_ids()`(与附件同一套范围判定)与它求交集,**没有交集就不建发信任务**
+    ——否则收件人会收到一封附件里根本没有这条日程的邮件。手动群发(重新生成、
+    「向当前人员发送最新版」)、CLI 导出与后台修复拿不到具体日历,留空即「发给全部收件人」;
+    `publish` 在调用方没给集合时按 `event.calendar_id` 推断。见
+    `tests/test_account_recipient_sync.py`。
 
 ## 部署时的三个陷阱
 

@@ -76,14 +76,18 @@ iOS 快捷指令等)通过 HTTP 新建日程。
   8. 事件校验失败 → **422** `validation_error`
   9. **新建成功 → 201**
 - **成功行为**:`create_event(source="agent", client_ref=..., calendar_id=..., user_id=令牌账号)`
-  → `mark_export_dirty` → 提交 → `publish(CHANGE_CREATED)`;
-  审计 detail 带 `event.id version calendar=`;邮件正文时间按提交者偏移表述
-- **副作用**:落库、生成 ICS、为启用收件人建发信任务(与界面同一条链路)
+  → `mark_export_dirty` → 提交 → `publish(CHANGE_CREATED, changed_calendar_ids=[落库日历])`;
+  审计 detail 带 `event.id version calendar=`;邮件正文时间按提交者偏移表述。
+  **只通知看得见这条日历的收件人**(2026-10-12 第四轮起):
+  快捷指令写进管理员的私人日历时,只收家庭共享日历的外部邮箱不会再收到空附件邮件
+- **副作用**:落库、生成 ICS、为**范围内**的启用收件人建发信任务(与界面同一条链路)
 - **不变量**:写入权限完全按令牌绑定账号的 `CalendarAccess` 判定
 - **测试**:`tests/test_api_agent.py::test_agent_creates_event_and_syncs`、
   `::test_rate_limit`、`::test_agent_event_editable_from_admin_ui`、
   `tests/test_family_mail.py::test_agent_token_of_disabled_account_is_rejected`、
-  `::test_legacy_env_agent_token_belongs_to_owner`
+  `::test_legacy_env_agent_token_belongs_to_owner`、
+  `tests/test_mail.py::test_agent_submitted_offset_reaches_the_mail_body`
+  (给外部收件人发信时事件必须落在共享日历里)
 
 #### `client_ref` 幂等边界(必须保持)
 
@@ -132,3 +136,5 @@ iOS 快捷指令等)通过 HTTP 新建日程。
   `client_ref` 命中时仅当对当前令牌可见才原样返回(否则 409)、
   新建事件落到「令牌固定日历 → 请求体日历 → 账号默认写日历」、
   以及跨账号读 404 与禁用账号 401。
+- 2026-10-12(第四轮):`POST /api/agent/events` 把**落库日历**交给
+  `publish(changed_calendar_ids=…)`,邮件只发给看得见这条日历的收件人。

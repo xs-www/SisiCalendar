@@ -62,6 +62,21 @@
   `tests/test_api_settings.py::test_settings_update_and_validation`、
   `::test_regenerate_creates_new_version`、`::test_send_latest_requires_confirmation`
 
+## 2026-10-12(第二轮):发信任务多返回「发起人」
+
+| 接口 | 变化 |
+|---|---|
+| `GET /api/v1/mail-deliveries` | `_recent_deliveries()` 每项多一个 `actor_label`(发起人显示名快照);历史任务为 `null` |
+| `POST /api/v1/sync/mail/send-latest` | `publish(...)` / `send_latest_to_enabled(...)` 改为显式传入 `admin.user_id` / `admin.label` |
+| `POST /api/v1/sync/calendar` | 同上(重新生成也记录操作者,但正文不写这一行) |
+
+- **位置**:`app/routers/api_sync.py:38`(`_recent_deliveries`)、`:84`、`:124`、`:128`
+- **返回**:`items[].actor_label`(`str | None`),契约在
+  `app/schemas.py::DeliveryRead`(新增字段带默认值 `None`,老客户端不受影响)
+- **不变量**:`actor_label` 是**快照**;接口不返回 `actor_user_id`,
+  也不做任何额外查询 —— 队列要还原「当时是谁」,发信正文才用现查的显示名
+- **测试**:`tests/test_mail_actor.py::test_queue_page_and_api_expose_the_actor`
+
 ## 相关接口
 
 - `GET /api/v1/settings` 需要管理员会话;`PATCH` 还需要 CSRF 头。
@@ -75,3 +90,5 @@
 - 2026-10-08:家庭版把 `read_settings` 收紧为 `AdminDep`、`update_settings` 收紧为
   `CsrfHeaderAdminDep`;并顺带归档 `app/routers/api_sync.py` 的同类改动
   (三个写接口改用 `CsrfHeaderAdminDep`)。
+- 2026-10-12(第二轮):`/api/v1/mail-deliveries` 每项新增 `actor_label`(发起人快照);
+  两个手动动作显式传当前管理员为发起人。测试见 `tests/test_mail_actor.py`。

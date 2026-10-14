@@ -10,8 +10,13 @@
 - **每人一条固定的订阅地址** `https://<节点>/calendar/<自己的令牌>.ics`,iPhone 订阅的是
   「个人 + 家庭共享」的合并结果;地址由服务端派生、永不变更,在「我的设置」里可以随时复制,
   验证邮箱后收到的那封邮件里也写着它。
-- 每次确认保存并成功生成新版 ICS 后,按收件人的范围分别邮件分发**尚未结束的日程**快照:
-  账号收件人收到自己可见的日历与**他自己的**订阅地址,外部邮箱只收到家庭共享日历、不给任何地址。
+- 每次确认保存并成功生成新版 ICS 后,把这次变更邮件分发给**看得见它的**收件人:
+  **账号邮箱是自动的**(成员填好邮箱并通过验证就算收件人),收到的是自己可见的日历与
+  **他自己的**订阅地址;设置页里的**外部邮箱**只收到家庭共享日历、不给任何地址。
+  附件是**尚未结束的日程**快照。
+- 每封日历邮件都在正文里写明**本次操作是谁发起的**(例如「发起人:爸爸」),这样家人一眼就能
+  看出是谁改了日程;「新增/修改/删除日程」会写这一行,管理员手动群发(重新生成、发送最新版)不写。
+  发起人来自当时操作的那个账号,快捷指令写进来的日程算在令牌绑定的账号名下。
 - **旧的订阅地址 `/calendar`(无令牌)已经失效**:手机里存过它的,请换成自己那条
   `/calendar/<自己的令牌>.ics`。
 
@@ -32,7 +37,7 @@
 | 订阅接口 | 公开面统一挂在 `PUBLIC_BASE_URL` 的路径前缀下(默认 `/calendar`);**每人一条固定地址** `/calendar/<自己的令牌>.ics`(可见范围合并),家庭订阅令牌只含共享日历;**旧的无令牌 `/calendar` 与 `/calendar.ics` 已取消,一律 404 纯文本**;ETag、Last-Modified、`304`、HEAD |
 | 订阅令牌 | 只存 `sha256`;随机令牌的明文只在创建时显示一次,可停用/撤销,撤销后地址立刻 404;**账号的固定地址由服务端密钥派生、永不变更,界面不给停用/撤销(409),但可以随时重新显示** |
 | 失败韧性 | 导出失败保留编辑、标记 `dirty`、每分钟自动修复,订阅端始终返回最近的有效文件 |
-| 邮件同步 | 持久化队列、`(版本, 收件人)` 幂等、逐人独立发送、退避重试、旧版附件隔离,队列显示操作/发送时间;**按收件人范围出附件**(账号=本人可见日历,外部=家庭共享),附件只含尚未结束的日程 |
+| 邮件同步 | 持久化队列、`(版本, 收件人)` 幂等、逐人独立发送、退避重试、旧版附件隔离,队列显示操作/发送时间与**发起人**;**发信前自动对齐账号收件人**(成员邮箱验证通过即成为收件人,设置页只维护外部邮箱);**只通知看得见这次改动的收件人**;**按收件人范围出附件**(账号=本人可见日历,外部=家庭共享),附件只含尚未结束的日程;**正文标明本次操作是谁发起的**(新增/修改/删除日程;手动同步不标) |
 | 安全 | Argon2id 口令、签名会话、CSRF 双提交、注册限流、严格 CSP、口令与 SMTP 密码只从环境注入 |
 | 运维 | 健康/就绪检查、一致性自检、在线备份与恢复、Alembic 迁移、Docker Compose |
 | 远程 Agent | 可选的 Bearer 令牌接口,供外部 Agent 经 HTTP 新建日程;每枚令牌绑定一个账号与一条默认日历;默认关闭,幂等键防重试重复 |
@@ -74,10 +79,11 @@ https://sisi-laptop.tail921448.ts.net/calendar/register?code=<邀请码>
 使用系统;通过后会再收到一封写着**本人固定订阅地址**的邮件。之后:
 
 - 成员的订阅地址在「我的设置 → 我的订阅地址」里长期可见,直接复制到 iPhone 的「添加订阅日历」;
-- 成员在「我的设置」里维护邮箱 → 成为**账号收件人**,只收自己可见日历的快照 —— 邮箱通过验证后
-  这个收件人才会建立;
+- 成员在「我的设置」里维护邮箱 → **通过验证后自动成为收件人**,只收自己可见日历的快照;
+  改动落在谁的可见日历里,就通知谁(看不见这次改动的成员不会收到邮件)。
+  这个收件人是**自动**的:设置页删不掉、也停不掉(要停止收信请由管理员停用该账号);
 - 管理员在「设置」页添加的**外部收件人**(如长辈的邮箱)只会收到家庭共享日历,不含任何人的私人
-  日程,也**不会**拿到任何人的订阅地址。
+  日程,也**不会**拿到任何人的订阅地址;设置页里那张表只管外部邮箱,成员账号邮箱在下方只读列出。
 
 ## 从单用户版升级
 
@@ -162,12 +168,14 @@ PUBLIC_BASE_URL=http://127.0.0.1:8443/calendar
 ## 测试
 
 ```powershell
-uv run pytest -p no:randomly -q  # 422 项测试
+uv run pytest -p no:randomly -q  # 450 项测试
 uv run ruff check app tests      # 静态检查
 ```
 
 覆盖 ICS 语义与时区/夏令时、事件 API 与并发冲突、订阅条件请求、原子替换与失败回退、
-邮件幂等与退避重试、邮件附件只含尚未结束的日程、时区序号解析、提醒(`VALARM`)取值与确定性导出、
+邮件幂等与退避重试、邮件附件只含尚未结束的日程、**邮件正文的发起人归属**、
+**账号收件人自动同步与「只通知看得见的人」**、
+时区序号解析、提醒(`VALARM`)取值与确定性导出、
 备份恢复往返;**公开面地址前缀与固定订阅地址、邮箱验证全流程、CLI 的 `DATA_DIR` 误指安全网**;
 家庭版另有账号/日历/成员权限、可见性与越界 404/403、邀请码注册、
 订阅令牌与家庭订阅范围、按收件人范围出附件、Agent 令牌作用域等测试。
@@ -175,10 +183,90 @@ uv run ruff check app tests      # 静态检查
 
 ## 部署
 
+> **给 Agent 的第一句话:本仓库目前没有任何预构建镜像。** 既没有发布到 GHCR / Docker Hub 的
+> 镜像,也没有 `compose.nas.yaml`。可用的部署材料**只有**仓库里的 `Dockerfile` 与
+> `compose.yaml`,所以本机与 NAS 现在都是**从源码构建**。预构建镜像的流水线计划见
+> [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md),**尚未实施**——在该计划落地之前,
+> 任何脚本、文档补丁、自动化都**不得**引用 `compose.nas.yaml` 或
+> `ghcr.io/xs-www/sisicalendar`,它们还不存在。
+
+本机(Windows + Docker Desktop)的最短路径:
+
 ```powershell
 Copy-Item .env.example .env      # 填写 SMTP、时区与 PUBLIC_BASE_URL
 docker compose up -d --build
 ```
+
+### 给 Agent:部署到本地 NAS 的 Docker(无镜像,从源码构建)
+
+#### 路线 A:在 NAS 上直接构建(有 git + Docker 即可,推荐)
+
+```bash
+# 1. 取代码。NAS 上没有 git 时改用 tarball:
+#    curl -L https://github.com/xs-www/SisiCalendar/archive/refs/heads/master.tar.gz | tar xz
+git clone https://github.com/xs-www/SisiCalendar.git /volume1/docker/sisi-calendar
+cd /volume1/docker/sisi-calendar
+
+# 2. 配置。PUBLIC_BASE_URL 的路径部分必须与对外挂载的前缀(/calendar)逐字一致
+cp .env.example .env && chmod 600 .env
+
+# 3. 改端口:NAS 的 443 通常被管理界面占用,把 compose.yaml 的宿主端口改成高位端口
+#      ports:
+#        - "127.0.0.1:18443:8000"     # 必须是 回环地址:宿主端口:8000
+#    切勿写成 "18443:8000"——那会把管理面暴露给整个局域网
+
+# 4. 数据目录归属:镜像以非 root 用户 10001:10001 运行
+mkdir -p data && sudo chown -R 10001:10001 data
+
+# 5. 构建并启动(首次构建数分钟;容器启动时会自动跑 Alembic 迁移与引导)
+docker compose up -d --build
+docker compose logs -f calendar        # 期望看到 "Running upgrade ... -> 0008_delivery_actor"
+```
+
+#### 路线 B:离线搬运镜像(NAS 不方便构建,或拉不到外网)
+
+镜像与容器同架构才可用(绝大多数 NAS 是 `amd64`;ARM 机型见 `docker image inspect` 的
+`Architecture`)。在已有镜像的机器上导出:
+
+```powershell
+docker compose build
+docker save sisi-calendar:0.1.0 -o sisi-calendar-0.1.0.tar
+scp .\sisi-calendar-0.1.0.tar admin@<NAS>:<部署目录>/
+```
+
+在 NAS 上导入并起容器(把 `compose.yaml` 与 `.env` 一起拷过去):
+
+```bash
+docker load -i sisi-calendar-0.1.0.tar
+docker compose up -d           # 不带 --build:同名镜像已存在,Compose 不会重新构建
+```
+
+#### 部署后必须逐条通过的检查
+
+| # | 命令(NAS 上把端口换成自己的宿主端口) | 期望 |
+|---|---|---|
+| 1 | `docker compose ps` | `Up (healthy)`,`RestartCount=0` |
+| 2 | `curl -i http://127.0.0.1:18443/healthz` | `200` + `{"status":"ok"}` |
+| 3 | `curl -i http://127.0.0.1:18443/readyz` | `200`,且 `checks` 全为 `ok` |
+| 4 | `curl -i http://127.0.0.1:18443/calendar/login` | `200` |
+| 5 | `curl -i http://127.0.0.1:18443/calendar` | **`404` + `text/plain`**(旧的无令牌地址已永久取消) |
+| 6 | `docker compose logs calendar` | 迁移到最新版 + 引导完成,**无 `Traceback`** |
+
+第 5 条是判别性的:若它返回 200 或 HTML,说明订阅命名空间被管理页污染了,不要交付。
+
+#### Agent 不可越过的约束
+
+- **端口**只能绑 `127.0.0.1`(或 NAS 的固定局域网 IP),禁止裸写 `18443:8000`。
+- **`data/` 必须在 NAS 本地 ext4/Btrfs 卷**,不要把 SQLite 主库放进 SMB/NFS 网络挂载;
+  数据卷要随容器保留,换镜像**只换容器不换卷**。
+- **`data/session_secret` 不得删除或轮换**:它是所有固定订阅地址与邮箱验证码哈希的密钥,
+  一换全家人的订阅地址立即失效(AGENTS.md 不变量 23)。
+- **重建/升级前先备份**:`docker compose exec -T calendar python -m app.cli backup`。
+- **迁移只由容器启动流程执行**:不要在宿主机跑 `uv run alembic`,它写死 `./data/calendar.db`,
+  会打到真实库(容器在跑时尤其危险)。
+- **对外只挂 `/calendar` 一段**,不要挂裸 `/admin`、`/api`、`/login`、`/static`。
+
+### 对外暴露(Tailscale Serve)
 
 管理面只绑定 `127.0.0.1`(本机 `http://localhost:443/admin`);家庭成员走 Tailscale Serve 上的
 **唯一一段 `/calendar`**,它同时承载登录、注册、管理界面与订阅地址:
@@ -202,7 +290,8 @@ tailscale serve --bg --yes --https=443 --set-path=/calendar http://127.0.0.1:443
 > 注意**轮换该密钥会让所有固定订阅地址与验证码哈希一起失效**。
 
 完整步骤、Tailscale ACL、备份恢复、升级回滚与故障排查见
-[`docs/部署与运维.md`](docs/部署与运维.md)。
+[`docs/部署与运维.md`](docs/部署与运维.md)(§2.4.1 是 NAS 的端口、目录与权限);
+预构建镜像(CI → GHCR)的实施计划见 [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md)。
 
 ## 目录结构
 

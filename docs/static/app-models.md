@@ -239,7 +239,13 @@
   - `email` 唯一 → 一个邮箱最多一条收件人记录(`app/accounts.py::sync_user_recipient`
     会在邮箱相同时认领既有行而不是新建);
   - **`user_id` 非空的行每个账号至多一条**——这正是 `0005`→`0006` 修复的核心,
-    也是 `AGENTS.md` 不变量 21
+    也是 `AGENTS.md` 不变量 21;
+  - **`user_id` 非空的行是派生数据**(2026-10-12 第四轮):它由
+    `users.email` + `users.enabled` + `email_verified_at` 唯一决定,
+    由 `app/accounts.py::sync_account_recipients` 维护;设置页与
+    `/api/v1/sync-recipients` 只负责 `user_id IS NULL` 的外部邮箱,
+    账号行既不能删也不能停用(两处都 409)。停用账号只会让该行 `enabled=False`,
+    重新启用账号时自动恢复
 - **测试**:`tests/test_family_accounts.py::test_profile_update_syncs_mail_recipient`、
   `::test_account_recipient_claims_matching_external_row`、
   `::test_legacy_recipients_keep_owner_scope_on_first_upgrade`(断言
@@ -276,6 +282,8 @@
 | 账号能不能用系统 | `users.email` 非空**且** `email_verified_at` 为空 | 待验证 → 页面 303 到验证页、`/api` 403 `email_not_verified`;**管理员豁免** |
 | 账号能不能当邮件收件人 | 同上(有邮箱 **且** 已验证) | 否则 `sync_user_recipient` 删除/不建该行 |
 | 邮件收件范围 | `app/accounts.py::recipient_scope_user_id` = `scope_user_id or user_id`;有值 = 该账号可见范围 | `NULL` = 共享日历 |
+| 谁来维护收件人 | `user_id` 非空 = 账号资料的派生结果(`sync_account_recipients` 自动对齐,界面/接口都不可增删启停) | `user_id` 为空 = 设置页维护的外部邮箱 |
+| 一次改动发给谁 | `app/mailqueue.py::_scope_calendar_ids(recipient)` 与本次改动的日历集合有交集 | 无交集 → 不建发信任务 |
 | 事件无人可见 | `events.calendar_id IS NULL` | 仅升级中间态,引导会回填 |
 
 ## 测试
@@ -299,3 +307,6 @@
   「关键语义速查」新增固定地址、邮箱验证闸门与账号收件人前置条件三行;
   并按当前源码校正 `Calendar`/`CalendarMember`/`InviteCode`/`FeedToken`/`Event`/
   `SyncRecipient`/`AgentToken` 的行号。
+- 2026-10-12(第四轮):`SyncRecipient` 补写「账号收件人是派生数据」这条不变量
+  (由 `sync_account_recipients` 维护,设置页/接口只碰外部邮箱;停用账号只停行不删行),
+  「关键语义速查」新增「谁来维护收件人」与「一次改动发给谁」两行。

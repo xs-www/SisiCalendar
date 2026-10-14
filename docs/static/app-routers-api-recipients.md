@@ -67,11 +67,13 @@
 ### `_reject_account_recipient(recipient, *, action) -> None`
 
 - **位置**:`app/routers/api_recipients.py:104`
-- **用途**:账号收件人由账号邮箱派生,不通过本接口维护
-- **状态码**:**409** `conflict`,字段名 `user_id`;文案提示去成员页或该成员的「我的设置」操作
-- **参数**:`action` 会拼进中文文案(如「修改邮箱」「删除收件人」)
+- **用途**:账号收件人由账号邮箱派生,不通过本接口维护(改邮箱、启停、删除都不行)
+- **状态码**:**409** `conflict`,字段名 `user_id`;文案提示去成员页或该成员的「我的设置」
+  操作,并说明「要让该账号停止收信,请停用这个账号」
+- **参数**:`action` 会拼进中文文案(如「修改邮箱」「停用或启用」「删除收件人」)
 - **测试**:`tests/test_family_pages.py::test_recipient_api_reports_scope_and_blocks_account_rows`
-  (删除路径)
+  (删除路径)、`tests/test_account_recipient_sync.py::test_api_rejects_disabling_an_account_recipient`
+  (**停用**路径,2026-10-12 第四轮新增)
 
 ## 路由契约
 
@@ -106,14 +108,17 @@
 ### `update_recipient(recipient_id, payload, admin, session)`
 
 - **位置**:`app/routers/api_recipients.py:163`
-- **状态码**:**200** 成功;**404** 收件人不存在;**409** 目标是账号收件人(改邮箱)
-  或新邮箱与他人冲突;**422** 邮箱非法 / 启用时缺确认
+- **状态码**:**200** 成功;**404** 收件人不存在;**409** 目标是账号收件人(改邮箱
+  **或改启用状态**)或新邮箱与他人冲突;**422** 邮箱非法 / 启用时缺确认
 - **字段语义**:只处理显式提交的字段(`email is not None`、`display_name is not None`、
   `enabled is not None`);`display_name` 提交空串等价于清空
 - **启用语义**:`enabled` 由 `False → True` 才要求 `acknowledge_full_calendar`;
   已经是启用状态再提交 `enabled=True` 不重复要求
-- **不变量**:改邮箱只对**外部收件人**有效;账号邮箱必须走账号资料
-- **测试**:`tests/test_api_settings.py::test_disable_then_enable_requires_acknowledgement`
+- **不变量**:改邮箱与改启用状态只对**外部收件人**有效;账号邮箱必须走账号资料,
+  「让这个账号停止收信」的唯一做法是**停用账号**(2026-10-12 第四轮:账号行的
+  `enabled` 也会被 `sync_account_recipients` 自动纠正,所以这里必须 409 而不是静默接受)
+- **测试**:`tests/test_api_settings.py::test_disable_then_enable_requires_acknowledgement`、
+  `tests/test_account_recipient_sync.py::test_api_rejects_disabling_an_account_recipient`
 
 ### `delete_recipient(recipient_id, admin, session)`
 
@@ -156,3 +161,7 @@
 - 2026-10-11:`serialize_recipient` 新增 `scope_user_id` / `scope_user_name`,`scope` 扩为
   `account` / `member`(历史绑定)/ `family` 三种,`scope_label` 文案更新;
   「两类范围」小节改名并改述为「三种范围」;顺带订正本文件其余条目的源码行号。
+- 2026-10-12(第四轮):本接口明确「只负责**外部邮箱**」——账号收件人是
+  `sync_account_recipients` 的派生结果,除改名外**连启用状态也不能在这里改**,
+  `PATCH {"enabled": …}` 命中账号行一律 **409**;`GET` 列表**仍然**返回账号行
+  (`scope == "account"`),那是只读视图,方便管理员看清谁在收信。

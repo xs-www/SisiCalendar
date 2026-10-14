@@ -408,8 +408,8 @@
 
 ### 邮件收件人片段(管理员)
 
-- **位置**:`_recipient_partial`(`:1255`)、`GET/POST /admin/partials/recipients`
-  (`:1281` / `:1292`)、`.../recipients/{id}/toggle`(`:1349`)、`.../recipients/{id}/delete`(`:1387`)
+- **位置**:`_recipient_partial`(`app/routers/pages.py:1310`)、`GET/POST /admin/partials/recipients`
+  (`:1341` / `:1351`)、`.../recipients/{id}/toggle`(`:1408`)、`.../recipients/{id}/delete`(`:1449`)
 - **本次变更**:
   - 上下文新增 `users`,模板据此渲染「范围」列(三种,见 `docs/static/templates.md`):
     `user_id` 非空 → 「本人可见日历」;`user_id` 为空但 `scope_user_id` 非空 →
@@ -422,9 +422,28 @@
   片段**上下文未变**(仍是 `recipients`、`users`、`csrf_token`、`default_timezone`、
   `mail_configured`、`notice`、`error`),三种范围完全由 `recipients` 行的
   `user_id` / `scope_user_id` 判定
+- **本次变更(2026-10-12 第四轮:「设置里的同步邮箱」收敛到外部邮箱)**:
+  - `_recipients(session)`(`:134`)现在**只返回外部行**(`user_id IS NULL`):这张可操作的表格
+    里再也没有账号收件人,增删启停都只影响外部邮箱;
+  - 新增 `_account_recipient_entries(session)`(`:149`)与上下文键 `account_recipients`:
+    逐个账号给出 `{user, email, verified, deliverable, status}`(`status` ∈
+    `自动同步中` / `邮箱待验证` / `未填邮箱` / `账号已停用,不收信`),
+    模板把它渲染成下方**只读**的「账号邮箱(自动同步)」表;
+  - 新增 `_guard_external_recipient(recipient, action)`(`:179`):账号行返回中文提示,
+    外部行返回 `None`。`toggle_recipient` 与 `remove_recipient` 命中账号行时
+    **409** + 提示「这是账号邮箱,自动跟随成员资料,不能在这里…;要停收信请到成员页停用该账号」
+    (此前的页面删除路径没有任何守卫,管理员可以在设置页把成员的账号收件人直接删掉);
+  - `_recipient_partial` 与 `settings_page` 在渲染前调一次
+    `app/accounts.py::sync_account_recipients`(有变化即提交):页面上的「谁在收信」
+    与邮件队列看到的是同一份事实,历史库里被删/停用的账号行会自动补回来;
+  - `GET /admin/settings` 的上下文新增 `account_recipients`
 - **测试**:`tests/test_family_pages.py::test_recipient_partial_shows_scope`
   (只覆盖「本人可见日历」与「家庭共享日历」两种文案,`scope_user_id` 支线未覆盖)、
-  `::test_recipient_api_reports_scope_and_blocks_account_rows`
+  `::test_recipient_api_reports_scope_and_blocks_account_rows`、
+  `tests/test_account_recipient_sync.py::test_settings_page_cannot_remove_or_disable_an_account_recipient`
+  (页面删除/停用账号行 → 409,行仍然启用)、
+  `::test_recipients_partial_lists_account_mail_as_read_only`
+  (账号邮箱出现在只读列表、且页面里没有它的 toggle/delete 表单)
 
 ### 权限矩阵(成员 vs 管理员)
 
@@ -552,3 +571,8 @@
   `settings_page` `:1191`、`_sync_partial` `:1953`、`__all__` `:2003` 等)。
   新增兜底测试 `tests/test_family_pages.py::test_all_pages_render_with_strict_undefined`
   (把 `templates.env.undefined` 换成 `StrictUndefined`,上下文缺键当场报错)。
+- 2026-10-12(第四轮:「设置里的同步邮箱」收敛到外部邮箱):`_recipients` 只返回外部行,
+  新增 `_account_recipient_entries`(只读的账号邮箱列表)与 `_guard_external_recipient`
+  (toggle/delete 命中账号行 → 409);`_recipient_partial` 与 `settings_page` 渲染前
+  调 `sync_account_recipients` 对齐并提交;`account_recipients` 进入片段与整页上下文。
+  测试:`tests/test_account_recipient_sync.py` 的两条页面用例。
