@@ -7,6 +7,8 @@
 与随之纳入 `ensure_directories()` 的目录准备;邮箱验证的三个阈值
 (`email_code_ttl_seconds` / `email_code_max_attempts` / `email_code_resend_seconds`)
 也走环境变量。其余家庭能力(账号、日历、邀请码、订阅令牌)都落库,不走环境变量。
+本轮(2026-10-14)另加 `host_port`:它**不改变监听**(监听永远是 `PORT`),
+只服务于设置页生成 `tailscale serve` 命令与从容器内探测宿主端口映射。
 **敏感值只允许通过环境注入**,绝不写入 SQLite、日志或响应。
 
 ## 派生路径(家庭版语义)
@@ -14,14 +16,14 @@
 | 属性 | 位置 | 路径 | 对外可见 |
 |---|---|---|---|
 | `data_dir` | `app/config.py:42` | `DATA_DIR`,默认仓库下 `data/` | — |
-| `export_dir` | `app/config.py:101` | `<data>/export` | 目录本身不对外 |
-| `calendar_path` | `app/config.py:105` | `<data>/export/calendar.ics` | **不对外**;只是全库并集,供版本号/`content_hash`/一致性检查用 |
-| `feed_dir` | `app/config.py:110` | `<data>/export/feeds` | **对外**,经 `/calendar/<令牌>.ics` 暴露 `user-<账号id>.ics` 与 `family.ics` |
-| `snapshot_dir` | `app/config.py:118` | `<data>/snapshots` | 不对外;版本快照与邮件附件 |
-| `backup_dir` | `app/config.py:123` | `<data>/backups` | 不对外 |
-| `secret_dir` | `app/config.py:127` | 同 `data_dir` | 不对外;放 `session_secret`、`admin.hash` |
-| `db_path` | `app/config.py:97` | `<data>/calendar.db` | 不对外 |
-| `database_url` | `app/config.py:131` | `sqlite+pysqlite:///<db_path>` | 不对外 |
+| `export_dir` | `app/config.py:105` | `<data>/export` | 目录本身不对外 |
+| `calendar_path` | `app/config.py:109` | `<data>/export/calendar.ics` | **不对外**;只是全库并集,供版本号/`content_hash`/一致性检查用 |
+| `feed_dir` | `app/config.py:114` | `<data>/export/feeds` | **对外**,经 `/calendar/<令牌>.ics` 暴露 `user-<账号id>.ics` 与 `family.ics` |
+| `snapshot_dir` | `app/config.py:122` | `<data>/snapshots` | 不对外;版本快照与邮件附件 |
+| `backup_dir` | `app/config.py:127` | `<data>/backups` | 不对外 |
+| `secret_dir` | `app/config.py:131` | 同 `data_dir` | 不对外;放 `session_secret`、`admin.hash` |
+| `db_path` | `app/config.py:101` | `<data>/calendar.db` | 不对外 |
+| `database_url` | `app/config.py:135` | `sqlite+pysqlite:///<db_path>` | 不对外 |
 
 - **`feed_dir` 是家庭版新增**:并集文件留在 `export/`(内部一致性产物),
   用户各自的订阅文件放在 `export/feeds/`;`calendar_path` 不再是对外发布路径。
@@ -48,39 +50,54 @@
 | `DEFAULT_TIMEZONE` | `:56` | 默认 IANA 时区,与账号自设时区配合(`app/accounts.py::user_timezone`) |
 | `PUBLIC_BASE_URL`(`public_base_url`) | `:61` | 对外公开的基地址(如 `https://host/calendar`);**其路径部分就是公开面的挂载前缀**,邀请链接、每人的订阅地址、邮件正文里的地址都从它派生。**取代并删除了旧的 `SUBSCRIPTION_URL`** |
 | `FEED_CACHE_SECONDS` | `:62` | 订阅响应 `Cache-Control: max-age`;仍固定带 `private` 与 `must-revalidate` |
-| `SMTP_*` | `:65`-`:72` | 邮件配置;`SMTP_PASSWORD` **只从环境注入**,库/日志/响应均不得出现 |
-| `EMAIL_CODE_TTL_SECONDS`(`email_code_ttl_seconds`) | `:76` | 验证码有效期(秒),默认 `1800`(30 分钟);登记时实际下限 60 秒(`max(60, …)`) |
-| `EMAIL_CODE_MAX_ATTEMPTS`(`email_code_max_attempts`) | `:77` | 单个验证码允许的错误次数,默认 `5`:**第 5 次错误即作废** |
-| `EMAIL_CODE_RESEND_SECONDS`(`email_code_resend_seconds`) | `:78` | 两次重发之间的冷却(秒),默认 `60`;配成 `0` 等于不限流 |
-| `MAIL_MAX_ATTEMPTS` / `MAIL_BACKOFF_MINUTES` | `:81` / `:82` | 发信重试;退避已在库内持久化 |
-| `EXPORT_SNAPSHOT_RETENTION_DAYS` | `:83` | 版本快照保留天数 |
-| `SCHEDULER_INTERVAL_SECONDS` / `SCHEDULER_ENABLED` | `:84` / `:85` | 后台任务间隔与开关 |
-| `AGENT_API_TOKEN` | `:89` | 逗号分隔的兜底 Agent 令牌;**归属首位管理员**;留空且库里也没有令牌时 `/api/agent` 整段 404 |
-| `AGENT_RATE_LIMIT_PER_MINUTE` | `:90` | 单个令牌指纹每分钟的 `/api/agent` 请求上限 |
-| `BACKUP_RETENTION_DAYS` | `:93` | 备份保留天数 |
+| `HOST_PORT`(`host_port`) | `:66` | 宿主机上发布的端口,默认 `443`(`compose.nas.yaml` 用 `18443`);**只**用于设置页生成 `tailscale serve` 命令与从容器内探测宿主端口映射,**不用它监听**(见下) |
+| `SMTP_*` | `:69`-`:76` | 邮件配置;`SMTP_PASSWORD` **只从环境注入**,库/日志/响应均不得出现 |
+| `EMAIL_CODE_TTL_SECONDS`(`email_code_ttl_seconds`) | `:80` | 验证码有效期(秒),默认 `1800`(30 分钟);登记时实际下限 60 秒(`max(60, …)`) |
+| `EMAIL_CODE_MAX_ATTEMPTS`(`email_code_max_attempts`) | `:81` | 单个验证码允许的错误次数,默认 `5`:**第 5 次错误即作废** |
+| `EMAIL_CODE_RESEND_SECONDS`(`email_code_resend_seconds`) | `:82` | 两次重发之间的冷却(秒),默认 `60`;配成 `0` 等于不限流 |
+| `MAIL_MAX_ATTEMPTS` / `MAIL_BACKOFF_MINUTES` | `:85` / `:86` | 发信重试;退避已在库内持久化 |
+| `EXPORT_SNAPSHOT_RETENTION_DAYS` | `:87` | 版本快照保留天数 |
+| `SCHEDULER_INTERVAL_SECONDS` / `SCHEDULER_ENABLED` | `:88` / `:89` | 后台任务间隔与开关 |
+| `AGENT_API_TOKEN` | `:93` | 逗号分隔的兜底 Agent 令牌;**归属首位管理员**;留空且库里也没有令牌时 `/api/agent` 整段 404 |
+| `AGENT_RATE_LIMIT_PER_MINUTE` | `:94` | 单个令牌指纹每分钟的 `/api/agent` 请求上限 |
+| `BACKUP_RETENTION_DAYS` | `:97` | 备份保留天数 |
 | `LOG_LEVEL` / `HOST` / `PORT` | `:43`-`:45` | 运行参数 |
 
-### 派生布尔与列表属性
+### `host_port`
+
+- **位置**:`app/config.py:66`
+- **类型 / 默认**:`int`,`443`;`compose.nas.yaml` 通过 `HOST_PORT: "${HOST_PORT:-18443}"` 传 `18443`
+- **用途**:只有两个消费点 —— 设置页生成 `tailscale serve` 命令
+  (`app/routers/pages.py::_serve_command`)与容器内探测宿主端口映射
+  (`app/host_port.py::probe_host_port`)
+- **不变量**:它**不是**监听端口。容器里监听的永远是 `PORT`(容器内 8000),
+  `host_port` 只描述「宿主机上 `127.0.0.1:<HOST_PORT>` 映射到容器 8000」这件事;
+  改它**不会**改变应用监听,端口映射由 `compose*.yaml` 的 `ports` 决定
+- **测试**:`tests/test_settings_public_base_url.py::test_serve_command_follows_host_port_and_prefix`
+  (断言命令里的端口跟着 `host_port`)、`::test_probe_rejects_an_out_of_range_port`、
+  见 [`app-host-port.md`](app-host-port.md)
+
+## 派生布尔与列表属性
 
 | 属性 | 位置 | 语义 |
 |---|---|---|
-| `backoff_minutes` | `app/config.py:135` | 解析 `MAIL_BACKOFF_MINUTES`;空串回落默认序列 |
-| `public_base_path` | `app/config.py:145` | 公开面挂载前缀,取自 `PUBLIC_BASE_URL` 的路径部分(转调 `app/urls.py::public_base_path`);基地址没有路径时为空串,整套路由退回裸路径 |
-| `mail_configured` | `app/config.py:152` | 有 `SMTP_HOST` 且有 `SMTP_FROM_ADDRESS` 才为真 |
-| `agent_tokens` | `app/config.py:156` | 逗号分隔切分并去空白,返回 `tuple[str, ...]`;明文只存在于进程内存 |
-| `agent_enabled` | `app/config.py:162` | 是否配置了 `.env` 令牌(**不代表接口可用**——库里令牌也算) |
+| `backoff_minutes` | `app/config.py:139` | 解析 `MAIL_BACKOFF_MINUTES`;空串回落默认序列 |
+| `public_base_path` | `app/config.py:149` | 公开面挂载前缀,取自 `PUBLIC_BASE_URL` 的路径部分(转调 `app/urls.py::public_base_path`);基地址没有路径时为空串,整套路由退回裸路径 |
+| `mail_configured` | `app/config.py:156` | 有 `SMTP_HOST` 且有 `SMTP_FROM_ADDRESS` 才为真 |
+| `agent_tokens` | `app/config.py:160` | 逗号分隔切分并去空白,返回 `tuple[str, ...]`;明文只存在于进程内存 |
+| `agent_enabled` | `app/config.py:166` | 是否配置了 `.env` 令牌(**不代表接口可用**——库里令牌也算) |
 
 ### 校验器
 
-- `_expand_data_dir`(`app/config.py:167`):`DATA_DIR` 支持 `~`
-- `_check_smtp_security`(`app/config.py:174`):`SMTP_SECURITY` 只接受
+- `_expand_data_dir`(`app/config.py:171`):`DATA_DIR` 支持 `~`
+- `_check_smtp_security`(`app/config.py:178`):`SMTP_SECURITY` 只接受
   `starttls` / `ssl` / `none`(大小写不敏感),其余抛 `ValueError`
 
 ## 函数
 
 ### `ensure_directories() -> None`
 
-- **位置**:`app/config.py:181`
+- **位置**:`app/config.py:185`
 - **用途**:创建 `data_dir` / `export_dir` / **`feed_dir`** / `snapshot_dir` / `backup_dir`
 - **副作用**:`mkdir(parents=True, exist_ok=True)`(幂等)
 - **本次变更**:新增 `feed_dir`
@@ -88,7 +105,7 @@
 
 ### `load_or_create_session_secret() -> str`
 
-- **位置**:`app/config.py:192`
+- **位置**:`app/config.py:196`
 - **用途**:返回会话签名密钥:优先 `SESSION_SECRET`;否则在 `<data>/session_secret`
   生成并复用(首次生成记一条 warning),避免每次重启导致登录态失效
 - **副作用**:可能创建目录并写文件(尽力 `chmod 0o600`)
@@ -99,24 +116,27 @@
 
 ### `public_base_path`(属性)
 
-- **位置**:`app/config.py:145`
+- **位置**:`app/config.py:149`
 - **用途**:给出公开面的挂载前缀(如 `/calendar`)
 - **行为**:转调 `app/urls.py::public_base_path(self)`,避免 `config` 与 `urls` 循环导入
 - **返回**:规范化的前缀;`PUBLIC_BASE_URL` 只有主机名时返回 `""`
 - **不变量**:前缀只有一个来源(`PUBLIC_BASE_URL` 的路径部分),
-  不得再引入第二个「订阅挂载点」配置——旧的 `SUBSCRIPTION_URL` 已删除
+  不得再引入第二个「订阅挂载点」配置——旧的 `SUBSCRIPTION_URL` 已删除;
+  库里那条 origin 覆盖(`app/settings_store.py::PUBLIC_BASE_URL_KEY`)**不能**参与
+  前缀计算,它只替换 origin
 - **测试**:`tests/test_public_prefix.py::test_public_surface_is_served_under_the_prefix`、
-  `::test_base_url_without_path_falls_back_to_bare_paths`
+  `::test_base_url_without_path_falls_back_to_bare_paths`、
+  `tests/test_settings_public_base_url.py::test_override_changes_only_the_origin`
 
 ### `env_file_path() -> str`
 
-- **位置**:`app/config.py:218`
+- **位置**:`app/config.py:222`
 - **用途**:读 `SISI_ENV_FILE`;指向不存在的文件等价于「忽略 `.env`」
 - **返回**:路径字符串;未设置时返回 `.env`
 
 ### `get_settings() -> Settings` / `reset_settings_cache() -> None`
 
-- **位置**:`app/config.py:223` / `app/config.py:228`
+- **位置**:`app/config.py:228` / `app/config.py:232`
 - **用途**:带 `lru_cache` 的进程级配置单例;`reset_settings_cache` 供测试清缓存
 - **不变量**:`Settings()` 直接构造只读进程环境变量——`env_file` 只在 `get_settings()`
   里显式传入,保证行为可预测
@@ -133,6 +153,7 @@
   `tests/test_public_prefix.py::test_base_url_without_path_falls_back_to_bare_paths`
 - 新订阅目录:`tests/test_family_mail.py::test_feed_files_exist_for_every_target_after_export`
 - Agent 限流阈值:`tests/test_api_agent.py::test_rate_limit`
+- 宿主端口语义:`tests/test_settings_public_base_url.py::test_serve_command_follows_host_port_and_prefix`
 
 ## 找不到对应测试的点
 
@@ -144,6 +165,8 @@
   改默认值时测试会失败,但改环境变量名的拼写不会。
 - `SMTP_PASSWORD` 的「不落库」由 `tests/test_mail.py::test_smtp_password_is_never_persisted`
   覆盖;会话签名密钥(`SESSION_SECRET` / `session_secret` 文件)没有同类测试。
+- `host_port` 只被设置页与探测用例间接覆盖:**没有**断言「改 `host_port` 不影响
+  `Settings.port` / 监听端口」的用例,也没有断言它从环境变量读到的用例。
 
 ## 变更记录
 
@@ -151,8 +174,14 @@
   纳入该目录)、`calendar_path` 改为内部并集产物,并汇总家庭版相关的配置语义
   (账号/日历/邀请码/订阅令牌均落库,不经环境变量;敏感值只从环境注入)。
 - 2026-10-12:`SUBSCRIPTION_URL` **删除**,由 `PUBLIC_BASE_URL`(`:61`)取代——
-  它的路径部分就是公开面挂载前缀,并新增派生属性 `public_base_path`(`:145`);
+  它的路径部分就是公开面挂载前缀,并新增派生属性 `public_base_path`(`:149`);
   新增邮箱验证的三个阈值 `EMAIL_CODE_TTL_SECONDS` / `EMAIL_CODE_MAX_ATTEMPTS` /
-  `EMAIL_CODE_RESEND_SECONDS`(`:76`–`:78`,默认 1800/5/60);
+  `EMAIL_CODE_RESEND_SECONDS`(`:80`–`:82`,默认 1800/5/60);
   `load_or_create_session_secret` 补记它是固定订阅地址与验证码哈希的唯一输入;
   顺带把本文件里因新配置插入而漂移的行号全部对齐到源码。
+- 2026-10-14:新增 `host_port`(`:66`,默认 `443`,`compose.nas.yaml` 传 `18443`)——
+  只服务设置页生成 `tailscale serve` 命令与宿主端口探测,**不改变监听**
+  (监听永远是 `PORT`);`public_base_path` 条目补记「库里的 origin 覆盖不参与前缀计算」。
+  因该字段插入,本文件全部行号按当前源码重校
+  (SMTP `:69`–`:76`、邮箱验证阈值 `:80`–`:82`、派生属性 `:139`/`:149`/`:156`/`:160`/`:166`、
+  `ensure_directories` `:185`、`load_or_create_session_secret` `:196`、`get_settings` `:228`)。

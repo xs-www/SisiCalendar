@@ -11,11 +11,17 @@
 渲染、所有跳转由 `app/urls.py::url()` 拼;**订阅面板的固定地址** —— 账号那条由服务端
 密钥派生、永不变更的订阅地址可以直接展示,但界面不给停用/撤销。
 
+本轮(2026-10-14)新增设置页的「对外地址(Tailscale)」卡片与宿主端口探测:
+`_tailnet_origin_hint`(只从 tailnet 域名自动填入候选)、`_serve_command`(按
+`HOST_PORT` 与挂载前缀生成命令)、`_settings_form_context`(整页与 HTMX 片段共用的上下文)、
+`POST /admin/actions/host-port-check`(管理员点击才跑的只读探测)。
+**界面里只能改 origin**,路径前缀仍由环境变量决定。
+
 ## 新增(2026-10-12:公开前缀根路由)
 
 ### `FEED_PLACEHOLDER_TEXT`
 
-- **位置**:`app/routers/pages.py:194`
+- **位置**:`app/routers/pages.py:245`
 - **内容**:一段中文纯文本,以「此地址不再提供日历。请使用属于你自己的订阅地址……」开头,
   并给出地址形状 `/calendar/sisi_feed_xxxx.ics`
 - **不变量**:它是**唯一**给订阅端看的"旧地址已取消"文案;文案里的路径形状要与
@@ -23,7 +29,7 @@
 
 ### `public_root(request) -> Response`
 
-- **位置**:`app/routers/pages.py:200`;由 `app/main.py` 用
+- **位置**:`app/routers/pages.py:251`;由 `app/main.py` 用
   `app.add_api_route(base_path, pages.public_root, methods=["GET", "HEAD"],
   include_in_schema=False)` 挂在**前缀本身**(`/calendar`)上
 - **用途**:无令牌的旧订阅地址彻底取消,但要让存错地址的订阅端拿到"看得懂的一句人话",
@@ -42,7 +48,7 @@
 
 ### `GET /` — `root`
 
-- **位置**:`app/routers/pages.py:219`(函数 `:220`),`include_in_schema=False`
+- **位置**:`app/routers/pages.py:270`(函数 `:271`),`include_in_schema=False`
 - **用途**:一条路由同时兜住裸根路径与前缀根路径(带尾斜杠的那种)
   - 当次请求前缀非空**且** `request.url.path.rstrip("/") == prefix` → 交给 `public_root(request)`
     (即 `/calendar/` 与 `/calendar` 行为一致)
@@ -57,7 +63,7 @@
 
 ### `_timezone_context(current=None) -> dict[str, object]`
 
-- **位置**:`app/routers/pages.py:117`
+- **位置**:`app/routers/pages.py:119`
 - **用途**:一次性给出时区相关的模板变量,避免各页面各拼一份
 - **返回的键**:
   - `timezones`:`all_timezones()` 的全部 IANA 名(新建/编辑页候选)
@@ -75,14 +81,14 @@
 
 ### `COMMON_TIMEZONES`
 
-- **位置**:`app/routers/pages.py:88`
+- **位置**:`app/routers/pages.py:90`
 - **本次变更**:由手写 16 项改为 `list(iana_names())`(来自 `app/timezones.py`,30 项)
 - **不变式**:`all_timezones()` 在缺少 tzdata 时回退到它,内容必须都是合法 IANA 名
 
 ### 页面上下文(默认时区 / 时区候选)
 
-- **位置**:`event_new_page`(`:306`)、`event_edit_page`(`:355`)、`settings_page`(`:1191`)、
-  `save_settings_action`(`:1737`)、`settings_form_partial`(`:1992`)
+- **位置**:`event_new_page`(`:357`)、`event_edit_page`(`:406`)、`settings_page`(`:1243`)、
+  `save_settings_action`(`:1867`)、`settings_form_partial`(`:2169`)
 - **本次变更**:原来的 `"timezones": all_timezones()` 改为展开 `**_timezone_context(...)`;
   设置页与设置片段把当前值传成 `overrides.get("default_timezone", settings.default_timezone)`
 - **说明**:保存失败时(`save_settings_action` 的 422 分支)下拉框回到**仍然生效**的时区,
@@ -92,25 +98,25 @@
 
 ### `_sync_partial(...)`
 
-- **位置**:`app/routers/pages.py:1953`
+- **位置**:`app/routers/pages.py:2130`
 - **本次变更**:上下文新增 `default_timezone = settings.default_timezone`,
   邮件队列表格用它把 `created_at` / `sent_at` / `next_attempt_at` 渲染成本地时间
 - **不变式**:`sync_page` 走 `_base_context`,同样提供 `default_timezone`,两条渲染路径行为一致
 
 ### `_deliveries(session, limit=30)`
 
-- **位置**:`app/routers/pages.py:139`
+- **位置**:`app/routers/pages.py:190`
 - **本次变更**:无(仍按 `created_at` 倒序取最近 30 条);新增列直接使用已有的
   `created_at` / `sent_at`,**不需要数据库迁移**
 
 ## 新增:远程接入令牌管理片段(HTMX)
 
-路由位于 `app/routers/pages.py:1409` 起,渲染 `templates/partials/tokens.html`,
+路由位于 `app/routers/pages.py:1477` 起,渲染 `templates/partials/tokens.html`,
 目标元素 `#agent-tokens`,与「同步人员」片段(`#recipients`)同构。
 
 ### `_token_partial(request, session, settings, *, notice, error, status_code, new_token) -> Response`
 
-- **位置**:`app/routers/pages.py:1409`
+- **位置**:`app/routers/pages.py:1477`
 - **用途**:统一渲染令牌片段
 - **上下文**:`tokens`(`token_store.list_tokens`)、`users`、`shared_calendars`、`csrf_token`、
   `default_timezone`、`new_token`(仅创建成功那一次非空)、`notice`、`error`
@@ -119,12 +125,12 @@
 
 ### `GET /admin/partials/tokens`
 
-- **位置**:`app/routers/pages.py:1439`;依赖 `AdminDep`(需登录 + 管理员)
+- **位置**:`app/routers/pages.py:1506`(函数 `:1507`);依赖 `AdminDep`(需登录 + 管理员)
 - **用途**:列出全部令牌(含已停用)
 
 ### `POST /admin/partials/tokens`
 
-- **位置**:`app/routers/pages.py:1449`;依赖 `CsrfAdminDep`(需登录 + 管理员 + CSRF)
+- **位置**:`app/routers/pages.py:1516`(函数 `:1517`);依赖 `CsrfAdminDep`(需登录 + 管理员 + CSRF)
 - **表单**:`label`、`user_id`(归属账号)、`calendar_id`(默认日历,**留空 = 该账号的个人日历**)、
   `acknowledge`
 - **行为**:未勾选 `acknowledge` → 422;`label` 空或超长 → 422;归属账号缺省落到首位管理员
@@ -136,7 +142,8 @@
 
 ### `POST /admin/partials/tokens/{token_id}` / `.../toggle` / `.../delete`
 
-- **位置**:`app/routers/pages.py:1518` / `:1552` / `:1576`
+- **位置**:`app/routers/pages.py:1583`(函数 `rename_token_route` `:1586`)、
+  `:1615`(`toggle_token` `:1620`)、`:1639`(`revoke_token` `:1644`)
 - **用途**:改名、启用/停用、撤销(硬删除)
 - **行为**:id 不存在 → 404;改名校验失败 → 422 且不写入
 - **副作用**:写库 + 审计 `agent_token_rename` / `agent_token_toggle` / `agent_token_revoke`
@@ -147,12 +154,15 @@
 
 ### `settings_page` 上下文
 
-- **位置**:`app/routers/pages.py:1191`
-- **本次变更**:新增 `"tokens": token_store.list_tokens(session)`,供设置页直接渲染令牌卡片
+- **位置**:`app/routers/pages.py:1243`
+- **本次变更(2026-10-08)**:新增 `"tokens": token_store.list_tokens(session)`,供设置页直接渲染令牌卡片
+- **本次变更(2026-10-14)**:不再自己拼「对外地址」那几个键,改为在上下文里展开
+  `**_settings_form_context(request, settings, overrides)`(`app/routers/pages.py:1258`)——
+  与 HTMX 只换片段那条路径共用同一套变量(见下文「对外地址(Tailscale)卡片」)
 
 ## `__all__`
 
-- **位置**:`app/routers/pages.py:2003`
+- **位置**:`app/routers/pages.py:2180`
 - **本次变更**:补充导出 `timezone_groups`,方便测试与外部脚本引用清单;
   另导出 `MEMBER_ROLE_LABELS`(共享日历的三档成员权限中文名)
 
@@ -160,7 +170,7 @@
 
 ### `event_new_page` / `event_edit_page`
 
-- **位置**:`app/routers/pages.py:306` / `app/routers/pages.py:355`
+- **位置**:`app/routers/pages.py:357` / `app/routers/pages.py:406`
 - **本次变更**:上下文新增两个键
   - `reminder_options`:`app/reminders.py::preset_options(...)`,新建页传空列表,编辑页传
     `serialize_event(event)["reminders"]`
@@ -174,7 +184,7 @@
 
 ### 基线上文 `_base_context(request, session, settings, *, active) -> dict`
 
-- **位置**:`app/routers/pages.py:147`
+- **位置**:`app/routers/pages.py:198`
 - **用途**:所有页面共用的上下文:当前账号、角色、CSRF、生效设置与展示用时间
 - **关键键**:
   - `current_user`:`optional_user(request, session)` 的结果;**未登录时为 `None`**,模板必须判空
@@ -184,7 +194,7 @@
     (`app/accounts.py::user_timezone`)
   - `system_timezone`:应用默认时区,与个人时区分开传,便于界面提示两者差异
   - `now_local`:按个人时区渲染的当前时间(`generated_at_display`)
-  - `public_base_url`(`app/routers/pages.py:162`,2026-10-12 起):`urls.public_base_url(settings)`,
+  - `public_base_url`(`app/routers/pages.py:213`,2026-10-12 起):`urls.public_base_url(settings)`,
     供只读展示"公开基地址"的页面片段使用
 - **不变量**:这是**唯一**注入 `current_user` / `is_admin` / `default_timezone` 的地方;
   新页面必须经它取上下文,不要自己再读一遍 request。
@@ -193,7 +203,7 @@
 
 ### `_csrf_of(request, session) -> str`
 
-- **位置**:`app/routers/pages.py:168`
+- **位置**:`app/routers/pages.py:219`
 - **用途**:给局部片段取当前账号的 CSRF 令牌
 - **返回**:已登录账号的令牌;**未登录返回空串**(不抛异常)
 - **说明**:片段渲染函数(`_members_partial`、`_recipient_partial`、`_sync_partial`、
@@ -202,7 +212,7 @@
 
 ### `_calendar_context(session, user) -> dict`
 
-- **位置**:`app/routers/pages.py:173`
+- **位置**:`app/routers/pages.py:224`
 - **用途**:日历页与事件表单共用的日历清单(带颜色与可写标记)
 - **返回**:
   - `access`:`app/accounts.py::CalendarAccess`,前后端判定可见/可写的唯一依据
@@ -213,7 +223,7 @@
 
 ### `GET /admin`(`calendar_page`)
 
-- **位置**:`app/routers/pages.py:228`(函数 `:229`);依赖 `UserDep`(登录即可,不限管理员)
+- **位置**:`app/routers/pages.py:279`(函数 `:280`);依赖 `UserDep`(登录即可,不限管理员)
 - **用途**:日历主页(本人可见日历的合并视图)
 - **角色分级**:管理员拿到完整的 `overview(...)`(版本、体积、邮件队列统计);
   成员只拿到 `dirty` / `version` / `size_bytes` / `generated_at` / `last_error` 五个键,
@@ -225,7 +235,7 @@
 
 ### `GET /admin/events/new`(`event_new_page`)
 
-- **位置**:`app/routers/pages.py:306`;依赖 `UserDep`
+- **位置**:`app/routers/pages.py:357`;依赖 `UserDep`
 - **用途**:新建日程表单
 - **日历下拉**:`?calendar=<id>` 只在**该账号可写**时才被选中,否则回落到
   `default_calendar_id`;两者都为空时 `event_writable=False`,模板把保存按钮置灰
@@ -235,7 +245,7 @@
 
 ### `GET /admin/events/{event_id}`(`event_edit_page`)
 
-- **位置**:`app/routers/pages.py:355`;依赖 `UserDep`
+- **位置**:`app/routers/pages.py:406`;依赖 `UserDep`
 - **越界处理**:`get_event(..., calendar_ids=access.viewable_ids())` 返回 `None` 时
   **404**(「事件不存在、已删除,或不属于你可访问的日历」)——不在可见范围内的私人日程
   既不显示也不泄露是否存在
@@ -246,7 +256,7 @@
 
 ### `_me_context(session, settings, current) -> dict[str, object]`
 
-- **位置**:`app/routers/pages.py:391`
+- **位置**:`app/routers/pages.py:442`
 - **用途**:「我的设置」**整页与局部片段共用**的上下文
 - **为什么必须共用**:整页 `me.html` 就是 `{% include "partials/me.html" %}`,
   两边喂的变量只要差一个,Jinja 默认的 `Undefined` 只会**安静地渲染成空串** ——
@@ -273,12 +283,12 @@
 
 ### `GET /admin/me`(`me_page`)/ `GET /admin/partials/me`(`me_partial`)
 
-- **位置**:`app/routers/pages.py:460` / `:478`;依赖 `UserDep`
+- **位置**:`app/routers/pages.py:510`(函数 `:511`)/ `:528`(函数 `:529`);依赖 `UserDep`
 - **用途**:个人资料、改口令、我自己的订阅地址(所有成员可用,不需要管理员)
 - **上下文**:
   - `me_page`:`_base_context(...)`(基线上文,**不含**时区候选)
     + `_me_context(...)` + `notice` / `error`(取自查询参数),渲染 `me.html`;
-  - `me_partial`:`_me_partial(...)`(`:428`),内部同样是 `_me_context(...)` 再加
+  - `me_partial`:`_me_partial(...)`(`:479`),内部同样是 `_me_context(...)` 再加
     `csrf_token` / `current_user` / `default_timezone = user_timezone(...)` / `notice` /
     `error` / `new_token`,渲染 `partials/me.html`(目标 `#me-panel`)
   - 整页里 `partials/me.html` 还会自己补 `timezone_groups` / `timezone_known` /
@@ -294,7 +304,7 @@
 
 ### `POST /admin/actions/profile`(`save_profile_action`)
 
-- **位置**:`app/routers/pages.py:488`;依赖 `CsrfDep`(登录 + CSRF);表单 `:487`
+- **位置**:`app/routers/pages.py:538`(函数 `:539`);依赖 `CsrfDep`(登录 + CSRF);表单字段 `:543`-`:546`
 - **表单**:`display_name`、`email`、`color`、`timezone`
 - **行为**:
   1. 记下 `previous_email`(小写去空白),走 `app/accounts.py::update_profile` 并提交;
@@ -320,7 +330,7 @@
 
 ### `POST /admin/actions/password`(`change_password_action`)
 
-- **位置**:`app/routers/pages.py:538`(函数 `:539`);依赖 `CsrfDep`
+- **位置**:`app/routers/pages.py:589`(函数 `:590`);依赖 `CsrfDep`
 - **表单**:`current_password`、`new_password`、`new_password_confirm`
 - **行为**:当前口令不对 → 401 + 审计 `password_change`(denied);两次新口令不一致 → 422;
   新口令不满足策略 → 422
@@ -329,8 +339,9 @@
 
 ### 我的订阅地址片段
 
-- **位置**:`_feed_partial`(`:577`)、`GET/POST /admin/partials/feeds`(`:622` / `:639`)、
-  `.../feeds/{token_id}/toggle`(`:681`)、`.../feeds/{token_id}/delete`(`:731`)
+- **位置**:`_feed_partial`(`:628`)、`GET/POST /admin/partials/feeds`(`:672` / `:689`)、
+  `.../feeds/{token_id}/toggle`(`:727`,函数 `:732`)、`.../feeds/{token_id}/delete`
+  (`:777`,函数 `:782`)
 - **用途**:每个账号管理**自己的** ICS 订阅地址(渲染 `partials/feeds.html`,目标 `#feeds`)
 - **本次变更(2026-10-12)**:上下文新增固定地址三件套
   - `fixed_feed_url`:`app/urls.py::subscription_url(settings, account_feed_token(settings, user_id))`,
@@ -355,24 +366,25 @@
 
 ### 成员与邀请码(管理员)
 
-- **位置**:页面 `members_page`(`:839`)、片段 `members_partial`(`:857`)/`invites_partial`(`:867`);
-  写操作 `create_invite_action`(`:877`)、`toggle_invite_action`(`:930`)、
-  `delete_invite_action`(`:954`)、`toggle_member_action`(`:978`)、
-  `reset_member_password_action`(`:1006`)、`set_member_role_action`(`:1037`)、
-  `delete_member_action`(`:1077`)、`set_calendar_role_action`(`:1109`)、
-  `create_shared_calendar_action`(`:1156`)
+- **位置**:页面 `members_page`(`:890`,函数 `:891`)、片段 `members_partial`(`:908`,函数 `:909`)/
+  `invites_partial`(`:918`,函数 `:919`);
+  写操作 `create_invite_action`(`:928`,函数 `:929`)、`toggle_invite_action`(`:977`,函数 `:982`)、
+  `delete_invite_action`(`:1001`,函数 `:1006`)、`toggle_member_action`(`:1025`,函数 `:1030`)、
+  `reset_member_password_action`(`:1053`,函数 `:1058`)、`set_member_role_action`(`:1084`,函数 `:1089`)、
+  `delete_member_action`(`:1124`,函数 `:1129`)、`set_calendar_role_action`(`:1156`,函数 `:1161`)、
+  `create_shared_calendar_action`(`:1205`,函数 `:1208`)
 - **依赖**:读走 `AdminDep`,写走 `CsrfAdminDep`(成员一律 403)
-- **上下文**:`_members_context`(`:787`)提供 `members`、`invites`、`shared_calendars`
-  (由 `_shared_calendar_entries`(`:779`)拼成「日历 + 该日历上各成员角色」)、
+- **上下文**:`_members_context`(`:838`)提供 `members`、`invites`、`shared_calendars`
+  (由 `_shared_calendar_entries`(`:830`)拼成「日历 + 该日历上各成员角色」)、
   `member_role_labels`(`owner`=可管理 / `editor`=可编辑 / `viewer`=只读)、`role_labels`(admin/member),
   以及 `invite_base_url`(`f"{urls.public_base_url(settings)}/register?code="`,
-  `app/routers/pages.py:796`)与 `public_base_url`(`:797`);
+  `app/routers/pages.py:847`)与 `public_base_url`(`:848`);
   **四个一次性明文键也有默认值**(`new_invite` / `new_invite_url` / `new_password` /
-  `reset_username` 全为 `None`,`:800`–`:803`)——整页 `/admin/members` 也经 include 渲染
+  `reset_username` 全为 `None`,`:851`–`:854`)——整页 `/admin/members` 也经 include 渲染
   `partials/members.html`,缺键时 Jinja 只会渲染空串,所以默认值必须在这里给
 - **行为**:
   - 邀请码:`valid_days` 非整数 → 422;`invites.create_invite` 校验失败(如 `max_uses` 越界)→ 422
-  - **邀请链接用 `urls.invite_url(settings, plaintext)` 生成**(`app/routers/pages.py:920`),
+  - **邀请链接用 `urls.invite_url(settings, plaintext)` 生成**(`app/routers/pages.py:972`),
     即 `<公开基地址>/register?code=<明文>`(明文经过 `quote`),与 `_members_context` 里
     给列表用的 `invite_base_url` 前缀**必须一致**
   - 停用/启用成员、改角色、重置口令、删除账号:目标不存在 → 404
@@ -393,14 +405,14 @@
 
 ### 家庭订阅地址片段(管理员)
 
-- **位置**:`_family_feed_partial`(`:1598`)、`GET/POST /admin/partials/family-feeds`
-  (`:1626` / `:1636`)、`.../family-feeds/{token_id}/toggle`(`:1670`)、
-  `.../family-feeds/{token_id}/delete`(`:1694`)
+- **位置**:`_family_feed_partial`(`:1666`)、`GET/POST /admin/partials/family-feeds`
+  (`:1693` / `:1703`)、`.../family-feeds/{token_id}/toggle`(`:1733`,函数 `:1738`)、
+  `.../family-feeds/{token_id}/delete`(`:1757`,函数 `:1762`)
 - **用途**:管理 `user_id=None` 的**家庭令牌**(渲染 `partials/family_feeds.html`,目标 `#family-feeds`)
 - **归属校验**:`row is None or row.user_id is not None` → 404,即这个片段**只管家庭令牌**,
   成员个人令牌必须回到各自 `/admin/me`
 - **上下文**:`feed_tokens`(只含家庭令牌)、`new_token`、`csrf_token`、
-  `subscription_prefix = urls.public_base_url(settings)`(`:1616`)、`default_timezone`、
+  `subscription_prefix = urls.public_base_url(settings)`(`:1684`)、`default_timezone`、
   `notice`、`error` —— **没有** `fixed_feed_url` / `fixed_token_id`(家庭令牌没有固定地址一说)
 - **副作用**:写库 + 审计 `family_feed_add` / `family_feed_toggle` / `family_feed_revoke`
 - **测试**:`tests/test_family_pages.py::test_admin_partials_render`、
@@ -408,8 +420,9 @@
 
 ### 邮件收件人片段(管理员)
 
-- **位置**:`_recipient_partial`(`app/routers/pages.py:1310`)、`GET/POST /admin/partials/recipients`
-  (`:1341` / `:1351`)、`.../recipients/{id}/toggle`(`:1408`)、`.../recipients/{id}/delete`(`:1449`)
+- **位置**:`_recipient_partial`(`app/routers/pages.py:1313`)、`GET/POST /admin/partials/recipients`
+  (`:1343` / `:1353`)、`.../recipients/{id}/toggle`(`:1406`,函数 `:1411`)、
+  `.../recipients/{id}/delete`(`:1447`,函数 `:1452`)
 - **本次变更**:
   - 上下文新增 `users`,模板据此渲染「范围」列(三种,见 `docs/static/templates.md`):
     `user_id` 非空 → 「本人可见日历」;`user_id` 为空但 `scope_user_id` 非空 →
@@ -423,13 +436,13 @@
   `mail_configured`、`notice`、`error`),三种范围完全由 `recipients` 行的
   `user_id` / `scope_user_id` 判定
 - **本次变更(2026-10-12 第四轮:「设置里的同步邮箱」收敛到外部邮箱)**:
-  - `_recipients(session)`(`:134`)现在**只返回外部行**(`user_id IS NULL`):这张可操作的表格
+  - `_recipients(session)`(`:135`)现在**只返回外部行**(`user_id IS NULL`):这张可操作的表格
     里再也没有账号收件人,增删启停都只影响外部邮箱;
-  - 新增 `_account_recipient_entries(session)`(`:149`)与上下文键 `account_recipients`:
+  - 新增 `_account_recipient_entries(session)`(`:150`)与上下文键 `account_recipients`:
     逐个账号给出 `{user, email, verified, deliverable, status}`(`status` ∈
     `自动同步中` / `邮箱待验证` / `未填邮箱` / `账号已停用,不收信`),
     模板把它渲染成下方**只读**的「账号邮箱(自动同步)」表;
-  - 新增 `_guard_external_recipient(recipient, action)`(`:179`):账号行返回中文提示,
+  - 新增 `_guard_external_recipient(recipient, action)`(`:180`):账号行返回中文提示,
     外部行返回 `None`。`toggle_recipient` 与 `remove_recipient` 命中账号行时
     **409** + 提示「这是账号邮箱,自动跟随成员资料,不能在这里…;要停收信请到成员页停用该账号」
     (此前的页面删除路径没有任何守卫,管理员可以在设置页把成员的账号收件人直接删掉);
@@ -455,6 +468,7 @@
 | `/admin/members`、`/admin/partials/members`、`/admin/partials/invites` | ❌ 403 | ✅ | `AdminDep` / `CsrfAdminDep` |
 | `/admin/settings`、`/admin/sync`、`/admin/partials/settings`、`/admin/partials/sync` | ❌ 403 | ✅ | 同上 |
 | `/admin/partials/recipients`、`/admin/partials/tokens`、`/admin/partials/family-feeds` | ❌ 403 | ✅ | 同上 |
+| `/admin/actions/host-port-check` | ❌ 403 | ✅ | `CsrfAdminDep`(2026-10-14 新增) |
 
 - **不变量**:成员被拒时是 **403**(`app/deps.py::Forbidden`,由 `app/main.py` 统一转成
   HTML 页或 `{"error": {...}}`);越权读取**事件**则是 **404**。两者不要混用。
@@ -466,7 +480,7 @@
 
 ### `GET /admin/sync`(`sync_page`)
 
-- **位置**:`app/routers/pages.py:1231`(函数 `:1232`);依赖 `AdminDep`(成员访问 403)
+- **位置**:`app/routers/pages.py:1289`(函数 `:1290`);依赖 `AdminDep`(成员访问 403)
 - **用途**:ICS 版本与邮件队列(`partials/sync_status.html`)
 - **不变量**:这里显示的是**全局并集版本**——任何成员的改动(包括改自己私人日历里的
   一条日程)都会推进同一个 `export_version` 并重发邮件;页面上没有「只重新生成某个人」
@@ -523,6 +537,137 @@
   `::test_invite_plaintext_is_shown_once_and_register_link_works`、
   `::test_reset_member_password_shows_one_time_password_once`
 
+## 新增(2026-10-14:对外地址卡片与宿主端口探测)
+
+设置页新增「对外地址(Tailscale)」区块(`templates/partials/settings_form.html:64` 起)。
+根约束不变:**界面里只能改 origin**,路径前缀是启动时挂载路由用的
+(`app/main.py`),运行时改它会让链接与路由错位,所以库里只存 origin、完整地址由
+`app/settings_store.py::effective_settings` 拼出来。宿主端口的只读探测见
+[`app-host-port.md`](app-host-port.md)。
+
+### `_tailnet_origin_hint(request, settings) -> str`
+
+- **位置**:`app/routers/pages.py:1784`
+- **用途**:从**本次请求**推导「对外地址」的候选 origin,用于设置页的「自动填入」
+- **返回**:
+  - `f"{scheme}://{name}"`,其中 `name` 取自 `Host` 头去掉端口后的部分(转小写),
+    `scheme` 取 `X-Forwarded-Proto` 的第一段;**取不到转发头时按
+    `settings.public_base_url` 的协议兜底**(是 `https://` 就 `https`,否则 `http`),
+    而不是硬猜 `https`;
+  - **空串**:`Host` 为空、`Host` 以 `[` 开头(IPv6 字面量)、或 `name` 不以
+    `.ts.net` 结尾
+- **参数**:`settings` 只用于上面那条「协议兜底」;真正决定路径前缀的地方仍是 `app/urls.py`
+- **副作用**:无(只读请求头)
+- **不变量**:
+  - `Host` 与 `X-Forwarded-Proto` **只是建议来源,不是安全判据** —— 值要管理员确认保存后
+    才写库,而且只允许写到 `*.ts.net` 上;
+  - `localhost`、内网 IP、IPv6 一律**不猜**(服务端无从知道你的节点名),
+    页面改为提示手动填写;
+  - 这里**不**校验、不规范化,真正的把关是
+    `app/settings_store.py::normalize_public_base_origin`
+- **测试**:`tests/test_settings_public_base_url.py::test_tailnet_visit_is_auto_filled_but_localhost_is_not`
+  (带 `host: sisi-laptop.tail921448.ts.net` 的片段里出现「已按你当前的访问地址自动填入」与
+  `https://sisi-laptop.tail921448.ts.net`;带 `host: localhost:443` 的片段里出现「请手动填写」)
+
+### `_serve_command(settings) -> str`
+
+- **位置**:`app/routers/pages.py:1805`
+- **用途**:生成给**宿主机**复制粘贴的 `tailscale serve` 命令(应用在容器里、非 root,
+  不碰整机配置,只生成文本)
+- **返回**:
+  - 有挂载前缀:`tailscale serve --bg --yes --https=443 --set-path=/calendar http://127.0.0.1:<HOST_PORT>/calendar`
+  - 无前缀:省略 `--set-path`:`tailscale serve --bg --yes --https=443 http://127.0.0.1:<HOST_PORT>`
+- **参数**:端口取自 `settings.host_port`(`HOST_PORT`),路径取自
+  `urls.public_base_path(settings)`
+- **副作用**:无(纯字符串拼接)
+- **不变量**:端口**不得**写死 443 —— `compose.nas.yaml` 发布的是 18443,
+  照抄文档就会生成一条打不通的命令;`--set-path` 与目标 URL 的路径必须**逐字相同**
+  (本仓库不依赖前缀剥离,见《部署与运维》第 3 节)
+- **测试**:`tests/test_settings_public_base_url.py::test_serve_command_follows_host_port_and_prefix`
+  (`host_port=18443` 与前缀 `/calendar` 的完整字符串断言;无前缀时省略 `--set-path`)、
+  `::test_settings_card_shows_source_prefix_and_serve_command`(片段里确实渲染出该命令)
+
+### `_settings_form_context(request, settings, overrides) -> dict[str, object]`
+
+- **位置**:`app/routers/pages.py:1818`
+- **用途**:`templates/partials/settings_form.html` 的上下文
+- **为什么必须共用**:`settings.html` 整页是 `{% include "partials/settings_form.html" %}`,
+  而 HTMX 保存后只换这一个片段 —— 两条渲染路径必须给出**同一套变量**。
+  模板开了 `StrictUndefined`,少一个变量就是 **500**(这是本轮真实踩到并修掉的坑,
+  所以上下文被抽成这一个函数)
+- **返回的键**:
+  - `settings`、`overrides`(模板用它回填其余字段)
+  - `public_base_url_effective`:`urls.public_base_url(settings)`(**当前生效值**,
+    已含挂载前缀)
+  - `public_base_url_env`:`urls.public_base_url(env_settings)`,其中
+    `env_settings = getattr(request.app.state, "settings", settings)`
+    —— **进程启动时的基线 `Settings`**(`app/main.py::create_app` 收到的那一份,
+    默认 `get_settings()`,即环境变量 / `.env`,**不含**库里的覆盖),
+    页面据此显示「来自环境变量」的来源
+  - `public_base_url_override`:库里那条 origin(`overrides.get(PUBLIC_BASE_URL_KEY, "")`),
+    非空时页面显示「(来自界面覆盖)」
+  - `public_base_url_input`:输入框的 `value`,优先级 = 库里的 origin → 自动检测到的候选 →
+    环境变量的完整地址
+  - `public_base_url_suggested`:`_tailnet_origin_hint(request, settings)`,但**已有覆盖时为空**
+    (不覆盖用户自己的选择)
+  - `public_base_path`:`urls.public_base_path(settings)`,页面用它写「路径前缀只读说明」
+  - `host_port`:`settings.host_port`,页面上直接显示
+  - `serve_command`:`_serve_command(settings)`
+- **副作用**:无
+- **不变量**:这是设置表单**唯一**的上下文来源;任何一条渲染路径都不得自己再拼一套
+  —— 尤其不许在整页里少喂 `serve_command` / `host_port` 这类新键
+- **测试**:`tests/test_settings_public_base_url.py::test_settings_card_shows_source_prefix_and_serve_command`
+  (断言「对外地址(Tailscale)」「当前生效值」「来自环境变量」「tailscale serve status」
+  与 `pages._serve_command(...)` 都在片段里)、
+  `::test_tailnet_visit_is_auto_filled_but_localhost_is_not`、
+  整页侧由 `tests/test_family_pages.py::test_all_pages_render_with_strict_undefined` 兜住
+
+### `_settings_form_response(request, session, settings, admin, *, notice, error, status_code=200) -> Response`
+
+- **位置**:`app/routers/pages.py:1846`
+- **用途**:渲染 `partials/settings_form.html`(HTMX 保存/校验失败后的那一片,以及
+  `GET /admin/partials/settings`)
+- **本次变更**:上下文改为抽出 `_settings_form_context(request, settings, overrides)`,
+  再叠加 `csrf_token`、`**_timezone_context(settings.default_timezone)`、`notice`、`error`;
+  `status_code` 由调用方给(校验失败是 422)
+- **副作用**:无(只读 `load_overrides`)
+- **不变量**:它给出的键必须与 `settings_page` 的整页上下文**逐字一致**
+- **测试**:`tests/test_settings_public_base_url.py::test_saving_the_card_field_updates_the_effective_url`
+  (表单 POST 后片段里出现新的生效地址)、
+  `tests/test_api_settings.py::test_settings_form_partial_updates_and_validates`
+
+### `POST /admin/actions/settings`(`save_settings_action`)
+
+- **位置**:`app/routers/pages.py:1866`(函数 `:1867`);依赖 `CsrfAdminDep`
+- **表单**:原有五项 + **`public_base_url: str = Form(default="")`**(`app/routers/pages.py:1876`)
+- **本次变更**:`values` 里多一个 `"public_base_url"`(`:1884`–`:1885`),
+  并改为 `save_overrides(session, values, effective_settings(session))`(`:1888`)
+  —— 把**生效设置**传进去,取挂载前缀时用的是已经叠加过覆盖的那一份
+- **空值语义**:表单字段留空 = **撤销覆盖**、回到环境变量(`save_overrides` 删行);
+  路径写法非法时 422 并回显文案
+- **副作用**:写库 + 审计 `settings_save/success`;失败回滚
+- **不变量**:保存后**不需要重启** —— 邀请链接、订阅地址、邮件正文里的地址都在下次
+  渲染时按新的 `Settings.public_base_url` 派生
+- **测试**:`tests/test_settings_public_base_url.py::test_saving_the_card_field_updates_the_effective_url`、
+  `::test_api_accepts_the_origin_and_returns_the_composed_url`
+
+### `POST /admin/actions/host-port-check`(`host_port_check_action`)
+
+- **位置**:`app/routers/pages.py:1908`(函数 `:1911`);依赖 `CsrfAdminDep`(登录 + CSRF + 管理员)
+- **用途**:探测宿主端口映射是否真的通了,把结果渲染成一个片段
+  (`templates/partials/host_port_check.html`,目标 `#host-port-result`)
+- **行为**:取 `effective_settings(session)` → `host_port.probe_host_port(settings)` →
+  审计 `host_port_check`(`success` / `failed`)→ 渲染片段
+- **上下文**:`reachable`、`detail`(中文说明,含修法)、`host_port`
+- **副作用**:一次**只读**宿主探测 + 一条审计;不写配置、不改库
+- **不变量**:
+  - **只在管理员点击时跑** —— 页面加载不会自动探测(它是同步阻塞的,2 秒超时);
+  - 探测目标由 `app/host_port.py` 写死(主机名 `host.docker.internal`、路径 `/healthz`、
+    端口只认整数),路由不额外传入任何目标;
+  - 按钮在模板里是 `type="button"`,**不是**提交按钮 —— 点它不会顺带保存设置
+- **测试**:`tests/test_settings_public_base_url.py::test_host_port_check_endpoint_returns_a_partial`
+  (monkeypatch 探测函数,断言片段里出现替身文案与 `host.docker.internal`)
+
 ## 找不到对应测试的点
 
 - `POST /admin/actions/profile` 的「验证码邮件发不出去」分支(notice 文案不同)没有专门测试。
@@ -533,6 +678,14 @@
 - 整页 `/admin/me` 与 `/admin/members` 的上下文已由 `_me_context` / `_members_context`
   共用,并由 `tests/test_family_pages.py::test_all_pages_render_with_strict_undefined` 兜住;
   但那条用例只保证「不缺键」,**没有**断言整页里确实出现了固定地址输入框或验证提示文案。
+- `_tailnet_origin_hint` 的 IPv6 分支(`Host` 以 `[` 开头)与「协议兜底」分支由
+  `tests/test_settings_public_base_url.py::test_tailnet_hint_scheme_falls_back_to_the_configured_base`
+  覆盖;「`Host` 带端口」分支由 `::test_tailnet_visit_is_auto_filled_but_localhost_is_not`
+  (`localhost:443`)间接覆盖。
+- `_settings_form_context` 的 `public_base_url_env`(环境变量**原值**,与生效值的区别)
+  没有专门断言,只有「来自环境变量」/「(来自界面覆盖)」这两句文案被间接覆盖。
+- `POST /admin/actions/host-port-check` 只覆盖了探测**成功**的替身分支;
+  失败时 `.alert error` 的渲染与审计 `failed` 都没有断言。
 
 ## 变更记录
 
@@ -561,6 +714,7 @@
   `test_my_feed_is_stable_and_temporary_token_shown_once`、
   `test_profile_update_creates_mail_recipient` 更正为 `test_profile_update_starts_email_verification`。
 - 2026-10-12(同日后补):抽出 `_me_context(session, settings, current)`(`:391`)——
+  (本条与下一条里的行号是**当时**的值,最新行号见 2026-10-14 条)
   整页 `/admin/me` 与片段 `/admin/partials/me` 从此共用同一套「我的设置」上下文
   (此前整页缺 `feed_tokens` / `fixed_feed_url` / `fixed_token_id` / `verify_state` / 时区候选,
   Jinja 的默认 `Undefined` 只会安静地渲染成空态);`_me_partial` 的参数与模板键统一为
@@ -576,3 +730,23 @@
   (toggle/delete 命中账号行 → 409);`_recipient_partial` 与 `settings_page` 渲染前
   调 `sync_account_recipients` 对齐并提交;`account_recipients` 进入片段与整页上下文。
   测试:`tests/test_account_recipient_sync.py` 的两条页面用例。
+- 2026-10-14:设置页新增「对外地址(Tailscale)」卡片与宿主端口探测。新增
+  `_tailnet_origin_hint`(`:1784`,只从 `Host`/`X-Forwarded-Proto` 推导候选且**只认
+  `*.ts.net`**,localhost/IPv6 一律不猜)、`_serve_command`(`:1805`,端口取
+  `HOST_PORT`、路径取挂载前缀,`--set-path` 与目标 URL 逐字相同)、
+  `_settings_form_context`(`:1818`,整页 `settings.html` include 与 HTMX 局部渲染**共用**
+  同一套变量 —— 模板开了 `StrictUndefined`,少一个键就是 500)与
+  `_settings_form_response`(`:1846`,改为展开该上下文);
+  `settings_page` 上下文同样改为 `**_settings_form_context(...)`(`:1258`);
+  `save_settings_action` 新增表单字段 `public_base_url`(`:1876`)并改用
+  `save_overrides(session, values, effective_settings(session))`(`:1888`,空值 = 撤销覆盖);
+  新增 `POST /admin/actions/host-port-check`(`host_port_check_action` `:1911`,
+  `CsrfAdminDep`,审计 `host_port_check`,渲染 `partials/host_port_check.html`)。
+  权限矩阵补该入口一行;全文行号按当前源码重校
+  (`FEED_PLACEHOLDER_TEXT` `:245`、`public_root` `:251`、`root` `:270`、
+  `_timezone_context` `:119`、`_base_context` `:198`、`_csrf_of` `:219`、
+  `_calendar_context` `:224`、`_me_context` `:442`、`settings_page` `:1243`、
+  `sync_page` `:1289`、`_recipient_partial` `:1313`、`_token_partial` `:1477`、
+  `_family_feed_partial` `:1666`、`_sync_partial` `:2130`、
+  `settings_form_partial` `:2169`、`__all__` `:2180` 等)。
+  测试:`tests/test_settings_public_base_url.py`(25 个用例)。

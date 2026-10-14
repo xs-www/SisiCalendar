@@ -2,8 +2,9 @@
 
 Pydantic 输入/输出模型。本次变更:新增 `EventWrite.url` / `EventWrite.reminders` 与
 `EventRead.reminders` / `EventRead.reminder_labels`;家庭版新增 `EventWrite.calendar_id`
-与 `EventRead` 的日历/权限字段;本轮(2026-10-12)把 `SyncStatusRead.subscription_url`
-改名为 `public_base_url`。
+与 `EventRead` 的日历/权限字段;2026-10-12 把 `SyncStatusRead.subscription_url`
+改名为 `public_base_url`;2026-10-14 给 `SettingsUpdate` 增加 `public_base_url`
+(**只收 origin**,路径前缀仍由环境变量决定)。
 
 ## 函数
 
@@ -44,9 +45,27 @@ Pydantic 输入/输出模型。本次变更:新增 `EventWrite.url` / `EventWrit
 
 ### `SettingsUpdate.default_timezone`
 
-- **位置**:`app/schemas.py:199`(校验器挂在 `app/schemas.py:205`)
+- **位置**:`app/schemas.py:199`(校验器挂在 `app/schemas.py:208`)
 - **类型**:`str | None`,同样经 `_normalize_timezone`
 - **校验**:`app/settings_store.py::validate_overrides` 负责解析与拒绝
+
+### `SettingsUpdate.public_base_url`
+
+- **位置**:`app/schemas.py:205`(模型类 `SettingsUpdate` 在 `app/schemas.py:195`)
+- **类型**:`str | None`,默认 `None`;`model_config = ConfigDict(extra="forbid")` **不变**
+- **语义**:对外基地址的 **origin**(`https://主机[:端口]`)。`PATCH /api/v1/settings`
+  收到后交给 `app/settings_store.py::normalize_public_base_origin` 规范化:
+  允许 `主机` / `主机:端口` / 完整 URL,**写了路径就必须与挂载前缀逐字一致**,
+  否则 422;库里也只存 origin
+- **空值**:空白字符串 = 撤销覆盖、回到环境变量(`exclude_none=True` 不会拦空串,
+  而是由 `validate_overrides` 把它清洗成 `""`)
+- **为什么只收 origin**:路径前缀是启动时挂载路由用的(`app/main.py`),运行时改路径会让
+  链接与路由错位;字段本身**不做** URL 语法校验,合法性一律由 `validate_overrides` 判定
+- **不变量**:这不是「完整基地址」的写入口 —— 完整地址由库里 origin +
+  `PUBLIC_BASE_URL` 的路径部分在 `app/settings_store.py::effective_settings` 里拼出来
+- **测试**:`tests/test_settings_public_base_url.py::test_api_accepts_the_origin_and_returns_the_composed_url`、
+  `::test_api_rejects_a_different_path`(422,且响应正文里出现 `public_base_url`)、
+  `::test_rejects_anything_that_is_not_a_usable_origin`
 
 ### `EventWrite.url` / `EventRead.url`
 
@@ -97,7 +116,7 @@ Pydantic 输入/输出模型。本次变更:新增 `EventWrite.url` / `EventWrit
 
 ### `SyncStatusRead.public_base_url`
 
-- **位置**:`app/schemas.py:243`(模型类 `SyncStatusRead` 在 `app/schemas.py:235`)
+- **位置**:`app/schemas.py:248`(模型类 `SyncStatusRead` 在 `app/schemas.py:240`)
 - **本次变更**:原来叫 `subscription_url` 的那个必填字段**改名为 `public_base_url`**
   (`git diff app/schemas.py` 可见 `-    subscription_url: str` → `+    public_base_url: str`)。
   仓库里**没有**名为 `SyncState` 的 Pydantic 模型,承载该字段的就是 `SyncStatusRead`
@@ -105,15 +124,22 @@ Pydantic 输入/输出模型。本次变更:新增 `EventWrite.url` / `EventWrit
 - **语义**:对外可复制的**公开基地址**(`PUBLIC_BASE_URL`,含路径前缀,如
   `https://宿主/calendar`),**不是**某个令牌的订阅地址、也不是旧的无令牌地址 ——
   旧 `SUBSCRIPTION_URL` 与 `/calendar`、`/calendar.ics` 都不再存在
-- **谁填它**:`app/sync_service.py::state_snapshot()`(`app/sync_service.py:220`)写入
-  `urls.public_base_url(resolved)`;`app/routers/api_settings.py::_serialize()`
-  (`app/routers/api_settings.py:39`)用同名键返回同一个值;`app/overview()` 在它的基础上
-  追加队列与收件人统计,所以 `/api/v1/sync/status` 与页面 `sync_state` 都带这个键
-- **不变量**:字段名与模板引用必须同步 —— 目前 `templates/partials/sync_status.html:23`
-  仍在读 `sync_state.subscription_url`,因而渲染出空值(见 `docs/static/templates.md`)。
-  改动这个字段时要一并核对模板与 `tests/test_timezones.py` 里手工构造的 `sync_state` 字典
+- **谁填它**:`app/sync_service.py::state_snapshot()`(`app/sync_service.py:235`)在
+  `app/sync_service.py:248` 写入 `urls.public_base_url(resolved)`
+  —— 传进来的 `resolved` 已是 `effective_settings` 的结果,所以库里的 origin 覆盖会体现在这里;
+  `app/routers/api_settings.py::_serialize()`(`app/routers/api_settings.py:39`)
+  用同名键返回同一个值;`app/sync_service.py::overview()`(`app/sync_service.py:253`)
+  在它的基础上追加队列与收件人统计,所以 `/api/v1/sync/status` 与页面 `sync_state` 都带这个键
+- **不变量**:字段名与模板引用必须同步(`templates/partials/sync_status.html:23`
+  读的是 `sync_state.public_base_url`);改动这个字段时要一并核对模板与
+  `tests/test_timezones.py` 里手工构造的 `sync_state` 字典;
+  值必须是**完整地址**(origin + 挂载前缀),不允许把库里的 origin 直接塞进来
 - **测试**:`tests/test_api_settings.py` 的设置/同步接口用例间接覆盖;
-  **没有**专门断言 `public_base_url` 存在且非空的用例(见 `docs/static/app-routers-api-settings.md`)
+  现在有了一条直接断言它的用例 ——
+  `tests/test_settings_public_base_url.py::test_api_accepts_the_origin_and_returns_the_composed_url`
+  (断言 `body["public_base_url"] == "https://other-node.ts.net/calendar"`),
+  以及 `::test_saving_the_card_field_updates_the_effective_url`(页面保存后用
+  `GET /api/v1/settings` 复核同一个键)
 
 ## 变更记录
 
@@ -125,3 +151,8 @@ Pydantic 输入/输出模型。本次变更:新增 `EventWrite.url` / `EventWrit
   同时按当前源码校正了全部既有条目的行号。
 - 2026-10-12:`SyncStatusRead` 的 `subscription_url` 改名为 `public_base_url`
   (同步状态里给的是公开基地址,不是某个订阅地址),并写明谁填它、模板引用尚未跟上。
+- 2026-10-14:新增 `SettingsUpdate.public_base_url`(`:205`,只收 origin,路径前缀不能经它改);
+  行号重校(`default_timezone` 校验器 `:208`、`SyncStatusRead` 类 `:240` / 字段 `:248`);
+  顺带更正上一轮的两处过期描述 —— `state_snapshot` 在 `app/sync_service.py:235`
+  (`overview` 在 `:253`),且 `templates/partials/sync_status.html:23` 已经改成读
+  `sync_state.public_base_url`,不再渲染空值。

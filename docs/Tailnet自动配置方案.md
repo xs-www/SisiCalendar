@@ -1,6 +1,14 @@
 # Tailnet 自动/半自动配置方案(设计稿)
 
-起草:2026-10-14 · 状态:**待决策,未实施**
+起草:2026-10-14 · 状态:**第 1 期(①A1 + ②B1 + ③C1)已实施(同日)**,第 2 / 第 4 期待定
+
+> **实施结果(2026-10-14 同日补记)**:用户选定的范围是「第 1 期:B1 + C1」,并把需求①重新表述为
+> **「避免本地部署时因 docker 日志卡住而丢掉初始口令」**(而不是要默认 `admin/admin`)——正好对应
+> 本文档的 **A1 一次性引导码**。三件事都已落地:引导码文件 + `/bootstrap` + 两条救援 CLI(①A1)、
+> 界面只改 origin 并自动检测 tailnet 地址(②B1)、宿主端口探测与端口正确的 serve 命令(③C1)。
+> 逐条实现与真机演练记录见 `todo.md` 的「2026-10-14 第二轮」与 `docs/验收测试记录.md` §3.10;
+> 函数级契约见 `docs/static/app-bootstrap-access.md`、`app-cli.md`、`app-settings-store.md`、
+> `app-host-port.md`。第 2 期(宿主机脚本)与第 4 期(sidecar)**未做**,红线仍然有效(§5)。
 
 需求原话:「如何将 tailnet 的配置也能够以某种方式自动或半自动的配置。如项目默认 admin / admin
 能够进入管理界面并作为家庭第 0 个成员。登录后允许用户自行根据自己的 tailnet 来配置预期的
@@ -8,11 +16,11 @@ baseURL。并自动检测本地 tailscale 环境,且自动进行端口映射。�
 
 ## 0. 结论速览
 
-| 子需求 | 能不能自动 | 建议做法 | 代价 |
+| 子需求 | 能不能自动 | 采用的做法(2026-10-14 实施) | 代价 |
 |---|---|---|---|
-| ① 开箱即有管理员可用 | **现在已经基本是** | 保持随机口令打印一次 + 补「首登引导」;若要 `admin/admin`,必须加约束 | 见 §2.1,默认口令 = 把管理员交给整个 tailnet |
-| ② 登录后自己配 baseURL | **能,但只能改 origin**(主机名/端口),路径前缀不能运行时改 | 新增可覆盖键 + 设置页卡片 + 「一键采用当前访问地址」 | §2.2,约 1 屏改动 |
-| ③ 自动检测 tailscale / 端口映射 | **检测能全自动;改 `tailscale serve` 不能**(除非上 sidecar) | 从请求推导 tailnet 地址 + 容器内探宿主端口 + 生成可复制命令 | §2.3 |
+| ① 开箱即有管理员可用 | **能,而且不必用弱口令** | **A1 一次性引导码**:初始口令状态把码写成 `${DATA_DIR}/bootstrap_code`,凭它在 `/bootstrap` 自己设口令,设完即关;兜底 `app.cli reset-admin-password` | 见 §2.1;比默认口令安全,**不依赖日志** |
+| ② 登录后自己配 baseURL | **能,但只能改 origin**(主机名/端口),路径前缀不能运行时改 | **B1**:新增可覆盖键(库里只存 origin)+ 设置页卡片 + 按请求自动填入 tailnet 候选地址 | §2.2;完整地址 = origin + 环境变量给的前缀 |
+| ③ 自动检测 tailscale / 端口映射 | **检测能全自动;改 `tailscale serve` 不能**(除非上 sidecar) | **C1**:从请求推导 tailnet 地址 + 容器内探宿主端口 + 生成端口正确的可复制命令 | §2.3;serve 仍在宿主机执行 |
 
 一句话:**「检测」可以全自动,「改整机 serve 配置」只能半自动(给人一条可复制的命令),
 要全自动就得引入 Tailscale sidecar 容器**——那不是配置项,是换部署形态。
@@ -160,36 +168,50 @@ compose 形态与排障复杂度都会上一档。**不建议作为默认路径*
 
 ## 3. 分期实施计划(每期可独立验收)
 
-### 第 1 期(推荐先做):B1 + C1 —— 「自己配地址 + 自动检测端口」
+### 第 1 期:B1 + C1 —— 「自己配地址 + 自动检测端口」(2026-10-14 **已实施**)
 
-- 改动:`app/settings_store.py`(可覆盖键 + 校验)、`app/routers/pages.py`(设置卡片)、
-  `app/templates/`(设置页片段,无内联脚本,值走 `data-*`)、`compose.nas.yaml`
-  (`extra_hosts` + `HOST_PORT`)、`.env.example`(注释说明)。
-- 新增测试:`tests/test_settings_public_base_url.py`:
-  只改 origin 生效;带路径/带 query/带 userinfo → 422;非法 scheme → 422;
-  **env 的路径仍是唯一来源**(覆盖前后 `public_base_path` 不变);
-  推导 `Host` 的候选只在 `*.ts.net` 时给出;`HOST_PORT` 非数字被拒。
-- 验收:`/admin/settings` 改 origin → 「我的设置」里的固定订阅地址与邀请链接立刻跟着变;
-  改路径 → 表单报错且链接不变;点检测 → 显示宿主端口可达性。
-- 不变量影响:8(前缀来源唯一)保持;新增一条「origin 可被库覆盖,路径不可」。
+- 实际改动:`app/settings_store.py`(可覆盖键 + 校验 + 只存 origin)、`app/schemas.py`、
+  `app/routers/api_settings.py` 与 `app/routers/pages.py`(设置卡片、保存字段、端口探测入口)、
+  `templates/partials/settings_form.html` 与新增 `host_port_check.html`(无内联脚本,按钮走 HTMX)、
+  `app/host_port.py`(探测)、`compose.nas.yaml`(`extra_hosts` + `HOST_PORT`)、`.env.example`。
+- 与原计划的差异:原计划写「templates 值走 `data-*`」,实现里**没有需要传给前端的值**
+  (候选地址在服务端渲染进输入框),所以没有新增 JS;「一键采用当前访问地址」也简化成
+  **进入页面时自动填入候选值**(少一个端点,且不会静默改配置——仍要人按保存)。
+- 实际上线测试:`tests/test_settings_public_base_url.py` **25 项**(用户要求的验收点全覆盖:
+  只改 origin 生效、带路径/带 query/带 userinfo/非法 scheme → 422、**env 的路径仍是唯一来源**、
+  候选只在 `*.ts.net` 时给出、`HOST_PORT` 非数字被拒、探测不可达文案、端口跟随 `HOST_PORT`)。
+- 验收(真机演练):`/admin/settings` 改 origin → 生效值立刻变成新地址(免重启);改路径 → 表单 422
+  且链接不变;点检测 → 如实显示宿主端口可达性;清空 → 回退环境变量。
+- 不变量影响:8(前缀来源唯一)保持;新增一条「origin 可被库覆盖,路径不可」(已写进 AGENTS.md
+  不变量 26 与 `docs/static/app-settings-store.md`)。
 
-### 第 2 期:C2 —— 宿主机脚本
+### 第 2 期:C2 —— 宿主机脚本(**未做**)
 
 - 改动:`scripts/tailscale-serve.ps1` / `.sh`(默认 dry-run)、`docs/部署与运维.md` §3 补一节。
 - 验收:在**已有多入口**的机器上跑 dry-run,输出与 `tailscale serve status` 一致;
   `-Apply` 后 `/calendar` 200、`/calendar` 仍 404 纯文本、其他入口(`/`、`/dsh`)未被删除。
 
-### 第 3 期(可选):A1 首登引导(或 A2/A3,按 §6 的决定)
+### 第 3 期:A1 首登引导(**已并入第 1 期实施**;A2/A3 明确不做)
 
-### 第 4 期(可选,不建议默认):C3 sidecar
+- 实施的是 **A1 一次性引导码**:`app/bootstrap_access.py` + `GET/POST /bootstrap` +
+  `app.cli bootstrap` / `reset-admin-password`,测试 `tests/test_bootstrap_access.py` **16 项**。
+- **A2(受限默认 `admin/admin`)与 A3(首个注册者成为管理员)不做**:仓库是公开的,
+  A2 等于公开后门配方;A3 会让任何能访问 `/calendar/register` 的人拿到管理员机会。
+
+### 第 4 期(可选,不建议默认):C3 sidecar(**未做**)
 
 ## 4. 待实测确认(实施前先各测一次,别写进文档当事实)
 
 1. serve 转发到后端的请求里,到底带哪些头(`X-Forwarded-Proto` / `X-Forwarded-Host` / `Host`),
    以及 HTTP/2 下是否一致 —— 在真机上 `curl -v` 一次即可确认。
+   **实施时的处理**:代码**不依赖**这两个头做安全判定,只把它们当「候选地址建议」,而且只对
+   `*.ts.net` 生效;拿不到就退化成「请手动填写」。所以这条即使与预期不符也不会失效,
+   仍建议在 NAS 上实测一次(候选值是否与 `tailscale status` 的 DNSName 一致)。
 2. NAS 的 Docker 版本是否支持 `host.docker.internal:host-gateway`(Docker 20.10+);
    不支持则 (b) 段退化为「只能手动确认端口」。
-3. `TS_SERVE_CONFIG` 在目标 tailnet 上是否已启用 HTTPS 证书。
+   **实施时的处理**:探测失败不是错误——页面会给出 `ports` / `HOST_PORT` / `extra_hosts` 三条修法,
+   并提示「本机源码运行时连不上属正常」。**尚未在 NAS 真机确认**(见 `todo.md` 遗留)。
+3. `TS_SERVE_CONFIG` 在目标 tailnet 上是否已启用 HTTPS 证书。—— **第 4 期(sidecar)未做,本条暂不相关。**
 
 ## 5. 明确不做的事(红线)
 
@@ -202,15 +224,16 @@ compose 形态与排障复杂度都会上一档。**不建议作为默认路径*
 - **不让 origin 覆盖影响路径前缀**(§2.2 B1 的校验就是为此)。
 - **不把「检测宿主端口」做成任意 URL 探测器**(host 写死、端口限数字)。
 
-## 6. 需要你决策的三件事
+## 6. 需要你决策的三件事(**2026-10-14 已定**)
 
-1. **需求①走哪条**?A0 保持现状 / **A1 一次性引导码(推荐)** / A2 受限默认 `admin/admin` /
-   A3 首个注册者成为管理员。
-2. **需求②的范围**:**B1 只改 origin(推荐,免重启)** / B2 连路径一起改(需要重建容器)。
-3. **需求③做到哪一档**:**C1 应用内检测 + 复制命令(推荐)** / C1+C2 再加宿主机脚本 /
-   一直做到 C3 sidecar(全自动,换部署形态)。
+1. **需求①走哪条**? → **A1 一次性引导码**(用户把需求重新表述为「避免丢初始口令」,同日实施)。
+2. **需求②的范围**? → **B1 只改 origin**(免重启;路径前缀仍由 `PUBLIC_BASE_URL` 决定)。
+3. **需求③做到哪一档**? → **C1 应用内检测 + 复制命令**(C2 宿主机脚本与 C3 sidecar 都没做)。
 
 ## 变更记录
 
 - 2026-10-14:新增本文档(设计稿,未实施)。结论:origin 可运行时覆盖、路径前缀不可;
   serve 只能半自动;默认口令不建议作为默认路径,给出 A1/A2/A3 三个替代。
+- 2026-10-14(同日,第二轮):**第 1 期与 A1 已实施**——按 §6 的决策落地 ①A1 + ②B1 + ③C1,
+  并把「一键采用」简化成自动填入、把 §4 两条待测项改写成「不依赖它也能工作」的处理方式;
+  新增不变量 26(origin 可覆盖、路径不可)与引导码通道的红线。第 2 / 第 4 期仍未做。

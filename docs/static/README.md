@@ -32,7 +32,10 @@
 | [`migrations-0007.md`](migrations-0007.md) | `migrations/versions/0007_email_verification.py`(`users` 加 5 个邮箱验证状态列,老邮箱回填为已验证) |
 | [`migrations-0008.md`](migrations-0008.md) | `migrations/versions/0008_delivery_actor.py`(`mail_deliveries` 加 `actor_user_id`/`actor_label`,只加列不回填) |
 | [`app-bootstrap.md`](app-bootstrap.md) | `app/bootstrap.py`(家庭版数据引导 `ensure_family_setup`) |
-| [`app-config.md`](app-config.md) | `app/config.py`(派生路径 `feed_dir`、公开基地址与邮箱验证阈值) |
+| [`app-bootstrap-access.md`](app-bootstrap-access.md) | `app/bootstrap_access.py`(首位管理员的**引导码**:文件载体、通道开关、常量时间校验) |
+| [`app-cli.md`](app-cli.md) | `app/cli.py` 的两个救援子命令 `bootstrap` / `reset-admin-password`(其余命令见《部署与运维》) |
+| [`app-host-port.md`](app-host-port.md) | `app/host_port.py`(宿主端口映射的**只读探测**,主机名写死、端口只认整数) |
+| [`app-config.md`](app-config.md) | `app/config.py`(派生路径 `feed_dir`、公开基地址与邮箱验证阈值、`host_port`) |
 | [`app-security.md`](app-security.md) | `app/security.py`(会话盐值 v2 与 `create_session`/`read_session`) |
 | [`app-email-verify.md`](app-email-verify.md) | `app/email_verify.py`(验证码状态机、闸门豁免规则与两封通知信) |
 | [`app-settings-store.md`](app-settings-store.md) | `app/settings_store.py` |
@@ -95,6 +98,33 @@
    新增 `compose.nas.yaml` 供 NAS 纯拉取部署(`image:` 替代 `build:`,服务名仍为 `calendar`,
    端口只绑 `127.0.0.1:18443`)。契约见 [`ci-docker-publish.md`](ci-docker-publish.md);
    操作步骤见《部署与运维》§2.9 / §5.1 / §5.2 与 `README.md` 的「部署」节。
+2. **首位管理员的引导码救援通道(不加迁移)**:
+   真机事故是「随机初始口令只出现在启动日志里,`docker logs` 一卡就永久丢失」,所以新增
+   [`app-bootstrap-access.md`](app-bootstrap-access.md)(`app/bootstrap_access.py`):
+   初始口令状态把一枚引导码写成 `${DATA_DIR}/bootstrap_code`(权限 600),
+   `/bootstrap` 可凭码自己设口令,**口令一设成功文件立刻删除、页面立刻 404**(不是常驻后门);
+   兜底用 [`app-cli.md`](app-cli.md) 的 `bootstrap`(查看/轮换)与 `reset-admin-password`
+   (口令彻底丢失时重置)。`GET/POST /bootstrap` 见 [`app-routers-auth.md`](app-routers-auth.md),
+   模板见 [`templates.md`](templates.md);操作步骤见《部署与运维》§2.7 / §8.7。
+3. **对外地址可在界面改 origin,并自动检测 tailnet 与宿主端口(不加迁移)**:
+   `概述`:路径前缀是**启动时挂载路由**用的,运行时改不了,所以界面里只允许改 origin,
+   库里也只存 origin(`settings_store.PUBLIC_BASE_URL_KEY`),完整地址 = origin + 当前前缀
+   (见 [`app-settings-store.md`](app-settings-store.md));`PATCH /api/v1/settings` 与设置页表单
+   都接受它(见 [`app-routers-api-settings.md`](app-routers-api-settings.md)、
+   [`app-routers-pages.md`](app-routers-pages.md))。新增
+   [`app-host-port.md`](app-host-port.md)(`app/host_port.py`)回答「宿主端口真的映射到了吗」;
+   `compose.nas.yaml` 增加 `HOST_PORT` 与 `extra_hosts: host-gateway`
+   (见 [`ci-docker-publish.md`](ci-docker-publish.md))。操作步骤见《部署与运维》§3.0.1。
+
+### 本轮附带修掉的缺陷
+
+- **`hmac.compare_digest` 的 ASCII 限制**:`app/bootstrap_access.py::verify_code` 原先直接比较
+  `str`,候选值含非 ASCII(用户在引导页粘一段中文)会抛 `TypeError` → **500 而不是「码错」**。
+  两侧先按 UTF-8 编码成字节再比较,非法可编码输入一律判为不相等
+  (见 [`app-bootstrap-access.md`](app-bootstrap-access.md);测试
+  `tests/test_bootstrap_access.py::test_non_ascii_candidate_is_rejected_instead_of_crashing`)。
+  **同一写法在 `app/security.py`(CSRF/管理员用户名比较)、`app/deps.py`(Bearer 令牌)、
+  `app/email_verify.py`(验证码)里也存在**,那几处尚未处理,列在 `todo.md` 待办。
 
 ## 本轮变更(2026-10-12)
 

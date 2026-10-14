@@ -1,7 +1,7 @@
 # `app/routers/auth.py`
 
-登录、登出、邀请码注册(`/login`、`/logout`、`/register`)与**邮箱验证**
-(`/verify-email` 及其三个动作)。
+登录、登出、邀请码注册(`/login`、`/logout`、`/register`)、**邮箱验证**
+(`/verify-email` 及其三个动作)与**初始口令救援**(`GET/POST /bootstrap`,2026-10-14 新增)。
 
 家庭版起登录主体是 `users` 表里的账号(不再是环境变量里的单一管理员):
 
@@ -9,7 +9,10 @@
 - `/register` 用邀请码自助注册,**必须填邮箱**,注册成功即登录但账号处于**待验证**;
 - 两个入口都有限流,注册额外受邀请码自身的次数与有效期约束;
 - 未验证的普通成员进不了任何业务面,由 `app/deps.py::_gate_verification` 送到
-  `/verify-email`(`AGENTS.md` 不变量 22);管理员豁免。
+  `/verify-email`(`AGENTS.md` 不变量 22);管理员豁免;
+- `/bootstrap` 是**首位管理员**专用的救援入口:只在 `must_change_password` 为真时存在,
+  用 `<DATA_DIR>/bootstrap_code` 里的引导码设一次新口令,成功后立即关闭
+  (见 [`app-bootstrap-access.md`](app-bootstrap-access.md))。
 
 `ADMIN_USERNAME` / `ADMIN_PASSWORD(_HASH)` 只在首次启动创建首位管理员,
 详见 `app/bootstrap.py::ensure_family_setup`。
@@ -21,20 +24,23 @@
 
 | 符号 | 位置 | 说明 |
 |---|---|---|
-| `LOGIN_RATE_LIMIT` / `LOGIN_RATE_WINDOW_SECONDS` | `app/routers/auth.py:55` / `:56` | 登录限流:8 次 / 300 秒,键 `login:<客户端 IP>` |
-| `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW_SECONDS` | `:57` / `:58` | 注册限流:5 次 / 600 秒,键 `register:<客户端 IP>` |
-| `_client_key(request)` | `:61` | 限流分桶键;取不到对端时用 `"unknown"` |
-| `_safe_next(value)` | `:66` | 只放行站内相对路径(必须以 `/` 开头且不是 `//`),否则回落到 **`urls.url("/admin")`**(带当前前缀),防开放重定向 |
-| `_login_context(...)` / `_register_context(...)` | `:73` / `:221` | 渲染上下文;每次都**新签发**一枚登录 CSRF,并写进双提交 Cookie |
-| `_set_login_cookies(response, settings, csrf_token)` | `:94` | 写 `sisi_login_csrf`(httponly、samesite=strict、max_age=3600) |
-| `_start_session(response, settings, user_id, username)` | `:106` | 签发并写 `sisi_session`,同时删掉登录 CSRF Cookie |
-| `_verify_context(...)` | `:430` | 验证页上下文:`current_user`、`csrf_token`、`email`、`resend_wait`、`code_length`、`ttl_minutes`、`max_attempts`、`notice`、`error`、`calendar_name`;`sent="1"`/`"0"` 分别补一条成功提示 / 失败提示 |
+| `LOGIN_RATE_LIMIT` / `LOGIN_RATE_WINDOW_SECONDS` | `app/routers/auth.py:56` / `:57` | 登录限流:8 次 / 300 秒,键 `login:<客户端 IP>` |
+| `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW_SECONDS` | `:58` / `:59` | 注册限流:5 次 / 600 秒,键 `register:<客户端 IP>` |
+| `BOOTSTRAP_RATE_LIMIT` / `BOOTSTRAP_RATE_WINDOW_SECONDS` | `:61` / `:62` | 引导码通道限流:5 次 / 600 秒,键 `bootstrap:<客户端 IP>`(2026-10-14 新增);引导码本身 24 字节随机,限流只是防扫 |
+| `BOOTSTRAP_CLOSED_DETAIL` | `:615` | 通道关闭时 404 的 `detail` 文案:「引导通道已关闭:首位管理员的口令不是初始口令。忘记口令请在服务器上执行 `python -m app.cli reset-admin-password`。」 |
+| `_client_key(request)` | `:65` | 限流分桶键;取不到对端时用 `"unknown"` |
+| `_safe_next(value)` | `:70` | 只放行站内相对路径(必须以 `/` 开头且不是 `//`),否则回落到 **`urls.url("/admin")`**(带当前前缀),防开放重定向 |
+| `_login_context(...)` / `_register_context(...)` | `:77` / `:225` | 渲染上下文;每次都**新签发**一枚登录 CSRF,并写进双提交 Cookie |
+| `_set_login_cookies(response, settings, csrf_token)` | `:98` | 写 `sisi_login_csrf`(httponly、samesite=strict、max_age=3600) |
+| `_start_session(response, settings, user_id, username)` | `:110` | 签发并写 `sisi_session`,同时删掉登录 CSRF Cookie |
+| `_bootstrap_context(request, settings, *, code, error, notice)` | `:621` | 引导页上下文:`error`、`notice`、`code`(预填)、`login_csrf`、`cookie_name`、`cookie_value`、`calendar_name`、`code_file`(引导码文件路径,只给路径不给码);每次渲染都新签发一枚登录 CSRF |
+| `_verify_context(...)` | `:434` | 验证页上下文:`current_user`、`csrf_token`、`email`、`resend_wait`、`code_length`、`ttl_minutes`、`max_attempts`、`notice`、`error`、`calendar_name`;`sent="1"`/`"0"` 分别补一条成功提示 / 失败提示 |
 
 ## 路由契约
 
 ### `GET /login` — `login_page`
 
-- **位置**:`app/routers/auth.py:120`
+- **位置**:`app/routers/auth.py:124`
 - **参数**:`next`(站内跳回路径,经 `_safe_next`)、`notice`(一次性提示文案)
 - **行为**:已登录(`optional_user` 非 `None`)时 **303 → `_safe_next(next)`**;否则渲染 `login.html`
   并写登录 CSRF Cookie
@@ -46,7 +52,7 @@
 
 ### `POST /login` — `login_submit`
 
-- **位置**:`app/routers/auth.py:138`
+- **位置**:`app/routers/auth.py:142`
 - **表单参数**:`username` / `password` / `csrf_token` / `next`
 - **校验顺序**(**限流最先**):
   1. 限流超限 → **429**,带 `Retry-After`,审计 `login/rate_limited`
@@ -69,7 +75,7 @@
 
 ### `POST /logout` — `logout`
 
-- **位置**:`app/routers/auth.py:210`
+- **位置**:`app/routers/auth.py:214`
 - **参数**:依赖 `CsrfDep` —— **登出也要 CSRF**(表单或 `X-CSRF-Token`)
 - **行为**:审计 `logout/success`,**303 → `urls.url("/login")`**(带当前前缀),
   删除 `sisi_session` Cookie
@@ -78,7 +84,7 @@
 
 ### `GET /register` — `register_page`
 
-- **位置**:`app/routers/auth.py:245`
+- **位置**:`app/routers/auth.py:249`
 - **参数**:`code`(邀请码,预填进表单;不做校验,校验在提交时)
 - **行为**:已登录 → **303 → `urls.url("/admin")`**;否则渲染 `register.html` 并写登录 CSRF Cookie
 - **测试**:`tests/test_family_web.py::test_register_page_and_submit`、
@@ -87,7 +93,7 @@
 
 ### `POST /register` — `register_submit`
 
-- **位置**:`app/routers/auth.py:260`
+- **位置**:`app/routers/auth.py:264`
 - **表单参数**:`code` / `username` / `display_name` / `email` / `password` / `password_confirm` /
   `csrf_token`
 - **校验顺序与状态码**(**限流最先**):
@@ -125,7 +131,7 @@
 
 ### `GET /verify-email` — `verify_email_page`
 
-- **位置**:`app/routers/auth.py:459`;依赖 **`AnyUserDep`**(登录即可,**不过**验证闸门)
+- **位置**:`app/routers/auth.py:463`;依赖 **`AnyUserDep`**(登录即可,**不过**验证闸门)
 - **参数**:`sent`(取 `"1"`/`"0"`,由注册成功后的 303 带上)
 - **行为**:`needs_email_verification(current.user)` 为假 → **303 → `urls.url("/admin")`**
   (已验证/管理员/无邮箱);否则渲染 `verify_email.html`
@@ -136,7 +142,7 @@
 
 ### `POST /verify-email` — `verify_email_submit`
 
-- **位置**:`app/routers/auth.py:476`;依赖 **`CsrfAnyDep`**;**表单**:`code`
+- **位置**:`app/routers/auth.py:480`;依赖 **`CsrfAnyDep`**;**表单**:`code`
 - **行为**:`email_verify.check_code(...)` 返回非 `ok` 时 `commit()` 后按状态渲染 422
   (文案:`missing` 还没有可用验证码 / `expired` 已过期 / `too_many` 错误次数过多已作废 /
   `mismatch` 不正确),同时记审计 `verify_email/<status>`
@@ -155,7 +161,7 @@
 
 ### `POST /verify-email/resend` — `verify_email_resend`
 
-- **位置**:`app/routers/auth.py:516`;依赖 **`CsrfAnyDep`**,无表单字段
+- **位置**:`app/routers/auth.py:520`;依赖 **`CsrfAnyDep`**,无表单字段
 - **行为**:
   - `needs_email_verification` 为假 → **303 → `urls.url("/admin")`**
   - `email_verify.resend_wait_seconds(...)` 大于 0 → **429**,
@@ -170,7 +176,7 @@
 
 ### `POST /verify-email/email` — `verify_email_change`
 
-- **位置**:`app/routers/auth.py:547`;依赖 **`CsrfAnyDep`**;**表单**:`email`
+- **位置**:`app/routers/auth.py:551`;依赖 **`CsrfAnyDep`**;**表单**:`email`
 - **用途**:注册时邮箱写错了的补救入口:改地址 → 重新发码,不必找管理员
 - **行为**:
   - `needs_email_verification` 为假 → **303 → `urls.url("/admin")`**
@@ -183,6 +189,95 @@
 - **不变量**:改邮箱走的是 `app/accounts.py::update_profile`,**邮箱唯一性**仍由它把关;
   换地址必然重新验证
 - **测试**:`tests/test_email_verify.py::test_can_fix_a_mistyped_email_from_the_verify_page`
+
+## 初始口令救援路由(2026-10-14 新增)
+
+> 领域层契约(`ensure_code` / `verify_code` / `pending_owner` / `clear_code` 等)与三条不变量见
+> [`app-bootstrap-access.md`](app-bootstrap-access.md);模板见
+> [`templates.md`](templates.md) 的 `templates/bootstrap.html` 一节。
+
+两条路由都 `include_in_schema=False`(公开文档里不出现),都按 `app/urls.py` 的机制挂**两遍**
+(裸路径 `/bootstrap` 与带前缀的 `/calendar/bootstrap` 都可用),判定依据一律是
+**`app/bootstrap_access.py::pending_owner(session)` 是否为空**——不看来源地址,
+也不另设开关。
+
+### `GET /bootstrap` — `bootstrap_page`
+
+- **位置**:`app/routers/auth.py:643`
+- **参数**:`code`(查询串里的引导码,预填进表单;为空则表单留空)
+- **行为**:
+  1. `effective_settings(session)` 取生效设置(`:651`);
+  2. `pending_owner(session) is None`(口令不是初始口令,或库里没有账号)→
+     抛 `HTTPException(404, detail=BOOTSTRAP_CLOSED_DETAIL)`(`:652`–`:653`)。
+     **响应体是 FastAPI 默认的 `{"detail": …}` JSON**,仓库里没有为 404 注册处理器
+     (只注册了 `NotAuthenticated` / `EmailNotVerified` / `CsrfFailure` / `Forbidden`,
+     见 `app/main.py:173`–`:220`);
+  3. 否则先 `bootstrap_access.ensure_code(resolved)` **自愈**(`:655`):文件被手工删掉时
+     在这一步补回来,所以「能打开这一页」就等于「通道可用」;
+  4. 渲染 `bootstrap.html`,上下文由 `_bootstrap_context`(`:621`)给出,
+     并 `_set_login_cookies(response, resolved, login_csrf)`(`:658`)
+     写登录 CSRF 双提交 Cookie。
+- **返回**:200 HTML(带严格 CSP——路径集合见 [`app-urls.md`](app-urls.md) 的
+  `is_admin_path`)/ 404
+- **副作用**:**可能创建** `<DATA_DIR>/bootstrap_code`(自愈);写 `sisi_login_csrf`
+  Cookie;页面里出现引导码文件路径(`code_file`),但**不出现也不记日志**引导码本身
+- **不变量**:通道关闭时**必须**404,不得渲染表单、不得自动开通道
+  (即「打开页面」不能反过来把已关闭的通道打开);`GET` **不消费**引导码
+- **测试**:`tests/test_bootstrap_access.py::test_bootstrap_page_is_closed_when_the_password_is_not_initial`
+  (裸路径与 `/calendar/bootstrap` 都是 404)、
+  `::test_bootstrap_page_serves_the_form_with_csp`(200、带
+  `Content-Security-Policy`、URL 上的码被预填、带前缀入口同样 200)
+
+### `POST /bootstrap` — `bootstrap_submit`
+
+- **位置**:`app/routers/auth.py:662`
+- **表单参数**:`code` / `password` / `password_confirm` / `csrf_token`
+- **校验顺序**(限流与 CSRF 都排在**通道判定之前**):
+  1. **限流最先**:`rate_limiter.check(...)`(`app/routers/auth.py:684`–`:688`),
+     键是 `bootstrap:<客户端 IP>`,`limit=BOOTSTRAP_RATE_LIMIT`、
+     `window_seconds=BOOTSTRAP_RATE_WINDOW_SECONDS`;超限 → **429**,
+     响应头带 `Retry-After`,审计 `bootstrap/rate_limited`;
+  2. **登录 CSRF 双击校验**(`:695`–`:698`):比较 Cookie `sisi_login_csrf` 与表单
+     `csrf_token`(`verify_login_csrf`)——**不是**依赖族的 `CsrfDep`/`CsrfAnyDep`,
+     而是与登录/注册页同一套「双提交 + 服务端签名」;不符 → **400**
+     「表单已过期,请重新提交。」,审计 `bootstrap/csrf_failed`;
+  3. **通道判定**(`:700`–`:702`):`pending_owner(session) is None` → **404**
+     (`BOOTSTRAP_CLOSED_DETAIL`,同上);
+  4. **引导码**(`:704`–`:708`):`verify_code(resolved, code)` 为假 → **401**
+     「引导码不正确:请把引导码文件里的那一串整行复制过来(区分大小写)。」,
+     审计 `bootstrap/denied`;码**不消费、不轮换**,通道继续开着;
+  5. **两次口令不一致**(`:710`–`:711`)→ **422**「两次输入的口令不一致。」;
+  6. `set_password(session, owner, password, must_change=False)`(`:713`–`:717`):
+     抛 `AccountError`(口令不合规等)→ **`session.rollback()`** + **422**
+     (文案取各字段错误拼接);这一步**先于**任何提交,失败不会改库;
+  7. **成功**(`:719`–`:725`):`session.commit()`(状态位落库)→
+     `bootstrap_access.clear_code(resolved)`(**删掉引导码文件**)→
+     `rate_limiter.reset(f"bootstrap:{client}")` → 审计 `bootstrap/success`
+     (actor 是账号名,不是 IP)→ **303 → `<前缀>/login?notice=管理员口令已设置,请用它登录。`**
+- **返回**:303(成功)/ HTML 表单(400 / 401 / 422,`bootstrap.html` + 错误文案)/
+  429(带 `Retry-After`)/ 404
+- **副作用**:写 `users.password_hash` / `must_change_password=False` / `updated_at`;
+  删除 `<DATA_DIR>/bootstrap_code`;重置该 IP 的引导限流;写四条审计之一
+  (`rate_limited` / `csrf_failed` / `denied` / `success`)
+- **不变量**:
+  - **成功后通道必须关上**:`must_change_password` 清零(由 `set_password`)、
+    文件被删(由 `clear_code`),此后 `GET/POST /bootstrap` 立刻 404,
+    旧引导码永久失效——这是「不是常驻后门」的落地点;
+  - **失败绝不能关通道**:401(码错)与 422(口令不一致/不合规)都不得删文件、
+    不得改状态位;422 必须 `rollback()`,不能把半截写入留在会话里;
+  - 限流键是 `bootstrap:<客户端 IP>`,`_client_key` 取不到对端时用 `"unknown"`
+    (Docker NAT 之下所有人看起来同源,限流只是防扫,见 `AGENTS.md` 部署陷阱 3);
+  - 引导码明文与口令明文都**不得**进日志;审计 detail 里没有码,只有客户端或账号名;
+  - **只有 `owner`**(首位管理员)会被改:`pending_owner` 已经限定,
+    不要扩展成「任意带 `must_change_password` 的账号」。
+- **测试**:`tests/test_bootstrap_access.py::test_setting_the_password_closes_the_channel`
+  (303 → `/login`、文件被删、页面 404、`must_change_password` 清零、新口令能登录且
+  不再被引导去改密)、
+  `::test_wrong_code_and_bad_password_keep_the_channel_open`
+  (错码 401 → 口令不一致 422 → 口令过短 422,全程码仍在)、
+  `::test_bootstrap_rejects_a_missing_csrf_token`(**400** 且码仍在)、
+  `::test_bootstrap_is_rate_limited_per_client`(连错 5 次后第 6 次 **429** + `Retry-After`)、
+  `::test_closed_channel_rejects_the_post_too`(通道关闭后 POST 也 **404**)
 
 ## 相关
 
@@ -205,6 +300,17 @@
 - `/verify-email` 与 `/verify-email/email` 的 **503 分支**(SMTP 未配置或发信失败)
   没有专门测试;`sent="0"` 时注册后验证页的提示也没有单独断言。
 - 「v1 会话升级后失效」没有回归测试,见 [`app-security.md`](app-security.md)。
+- **`POST /bootstrap` 收到非 ASCII 引导码会 500**:`app/bootstrap_access.py::verify_code`
+  直接调 `hmac.compare_digest(str, str)`,含非 ASCII 字符的候选值会抛 `TypeError`
+  (实测报错文案是「comparing strings with non-ASCII characters is not supported」),
+  路由没有捕获它,表现为 500 而不是 401。没有测试覆盖,见
+  [`app-bootstrap-access.md`](app-bootstrap-access.md) 的「已知边界」。
+- `GET /bootstrap` 的 **404 响应体形状**没有断言(现有用例只断言状态码;
+  实际是 FastAPI 默认的 `{"detail": …}` JSON,不是纯文本)。
+- `bootstrap` 限流的**窗口过期**(600 秒后重新放行)与「成功时重置限流」
+  (`rate_limiter.reset`)没有专门用例,只有「连错 5 次 → 429」这一条。
+- 成功后的 **303 目标只断言了 `/login` 前缀**,`?notice=管理员口令已设置,请用它登录。`
+  的文案与 URL 编码没有被逐字断言。
 
 ## 变更记录
 
@@ -216,3 +322,12 @@
   (`GET/POST /verify-email`、`/verify-email/resend` 60 秒冷却 429、
   `/verify-email/email` 改地址重发),验证通过后补建账号收件人并邮件告知**固定**订阅地址;
   全部跳转改用 `urls.url()` 以跟随公开前缀;按当前源码校正全部行号。
+- 2026-10-14:初始口令救援通道。新增 `GET /bootstrap`(`bootstrap_page`,通道关闭时 404、
+  打开页面时 `ensure_code` 自愈、写登录 CSRF Cookie)与 `POST /bootstrap`
+  (`bootstrap_submit`,限流 5 次 / 600 秒 → 429、登录 CSRF 双击校验 → 400、
+  通道判定 → 404、码错 → 401、口令不一致或不合规 → 422、
+  成功则 `set_password(must_change=False)` → `commit` → `clear_code` → 303 到
+  `/login?notice=…`),以及新常量 `BOOTSTRAP_RATE_LIMIT` / `BOOTSTRAP_RATE_WINDOW_SECONDS` /
+  `BOOTSTRAP_CLOSED_DETAIL` 与新辅助 `_bootstrap_context`;
+  两条路由都 `include_in_schema=False`;按当前源码校正全文行号(本次新增的常量块让
+  其后的行号整体 +4),并补「找不到对应测试的点」四条。

@@ -22,6 +22,8 @@ uv run pytest -q                          # 全量测试
 uv run ruff check app tests --fix         # 静态检查
 uv run python -m app.cli verify           # 一致性检查 + 自动修复
 uv run python -m app.cli backup           # 生成一致的 SQLite 快照
+uv run python -m app.cli bootstrap        # 查看/轮换首位管理员的引导码(口令救援,不需要口令)
+uv run python -m app.cli reset-admin-password --generate   # 口令彻底丢失时重置(打印一次性口令)
 ```
 
 `DATA_DIR` 默认是仓库下的 `data/`,开发时可用环境变量指向别处。测试全部使用临时目录。
@@ -53,11 +55,13 @@ app/
 ├─ sync_service.py  「保存 → 生成 → 建邮件任务」编排(publish 是唯一入口)
 ├─ mailer.py        SMTP 连接与 MIME 构造
 ├─ mailqueue.py     持久化发信队列、幂等、退避重试、按收件人范围取附件
-├─ settings_store.py 非敏感配置覆盖
+├─ settings_store.py 非敏感配置覆盖(含对外基地址的 origin 覆盖)
+├─ host_port.py     宿主端口映射的只读探测(设置页「检测宿主端口映射」用)
 ├─ token_store.py   远程接入令牌(只存 sha256,明文只在创建时返回一次)
 ├─ scheduler.py     后台任务(ICS 修复、队列轮询、快照清理)
 ├─ backup.py        在线备份、恢复、清理
 ├─ bootstrap.py     迁移与启动检查(家庭版数据引导)
+├─ bootstrap_access.py 首位管理员的引导码(口令救援通道,文件载体)
 ├─ cli.py           运维命令
 └─ routers/         health / feed / auth / pages / api_*
 ```
@@ -192,6 +196,26 @@ app/
     「向当前人员发送最新版」)、CLI 导出与后台修复拿不到具体日历,留空即「发给全部收件人」;
     `publish` 在调用方没给集合时按 `event.calendar_id` 推断。见
     `tests/test_account_recipient_sync.py`。
+26. **首位管理员的引导码只在「初始口令」状态下存在**:
+    `app/bootstrap_access.py` 把码写成 `${DATA_DIR}/bootstrap_code`(权限 600,`sisi_boot_` 前缀),
+    判据是 `users.must_change_password`;`ensure_family_setup` 每次启动按状态对齐
+    (待改密 → 确保文件在,手工删了会自愈;已定稿 → 删掉)。**口令一设置成功
+    (`set_password(..., must_change=False)`)文件立刻删除、`/bootstrap` 立刻 404**——
+    它不是常驻后门。引导码**永不**进日志、数据库、邮件或审计(日志只写文件路径),
+    比较必须常量时间**且先把两侧编码成字节**(`hmac.compare_digest` 对非 ASCII 的 `str` 会抛
+    `TypeError`,那会把「码错」变成 500)。救援入口是 `app.cli bootstrap`(查看/`--rotate`)与
+    `app.cli reset-admin-password`;`.env` 里的 `ADMIN_PASSWORD_HASH` **只在首次创建首位管理员时
+    生效**,对已有库改它无效。见 `tests/test_bootstrap_access.py`。
+27. **对外基地址的 origin 可以被库覆盖,路径前缀不可以**:
+    `settings_store.PUBLIC_BASE_URL_KEY` 在库里**只存 origin**(`https://主机[:端口]`),
+    完整地址由 `compose_public_base_url` 与**环境变量 `PUBLIC_BASE_URL` 的路径部分**现拼
+    (所以以后改 `.env` 重建容器也不会带错路径);校验拒绝一切非 origin 形态,包括
+    「路径与挂载前缀不一致」。理由:路径前缀是**启动时挂载路由**用的(`app/main.py`),
+    运行时改它会让页面链接与路由错位。按请求推导 tailnet 候选地址时,`Host` /
+    `X-Forwarded-Proto` **只作为建议来源、不是安全判据**,只对 `*.ts.net` 生效,且必须管理员
+    确认保存后才写库;宿主端口探测**只能**连 `host.docker.internal:<HOST_PORT>/healthz`
+    (主机名写死、端口只认 1–65535 的整数,不是任意 URL 探测器)。
+    见 `tests/test_settings_public_base_url.py`。
 
 ## 部署时的三个陷阱
 
@@ -222,8 +246,9 @@ app/
 - **写进文档的真机证据必须脱敏**:`docs/`、`README.md`、`AGENTS.md`、`todo.md` 都是
   **纯文本产物,没有任何机制替我们兜底**(日志有 `app/util.mask_email`、库有 SQLite,
   文档只有这条约定)。从生产库粘贴证据时,邮箱一律写成 `mask_email` 的形态
-  (`9******@qq.com`),口令、令牌、邀请码、验证码、固定订阅地址只写**指纹或掩码**,
-  不写明文;确需指代某人时用显示名或用户名。仓库是公开的,推送即公开且**难以撤回**。
+  (`9******@qq.com`),口令、令牌、邀请码、验证码、固定订阅地址、引导码(`bootstrap_code`)
+  只写**指纹或掩码**,不写明文;确需指代某人时用显示名或用户名。仓库是公开的,推送即公开且
+  **难以撤回**。
   反面案例:2026-10-14 发现第五轮的验收记录直接粘贴了 `sync_recipients` 的真实邮箱明文
   (同日已打码,但那两个地址已经公开过一次)。
 - 前端不使用内联脚本:管理页启用了严格 CSP(`script-src 'self'`),JS 放在 `static/js/`,

@@ -1,5 +1,80 @@
 # TODO
 
+## 本轮已完成(2026-10-14 第二轮:初始口令救援通道 + 对外地址可在界面改)
+
+需求原话:怎么让 tailnet 配置也能自动/半自动配好;登录后允许用户按自己的 tailnet 配 baseURL,
+并自动检测本地 tailscale 环境与端口映射;以及**「本地部署时因为 docker 日志卡住而丢了初始密码」
+必须避免**。设计稿 [`docs/Tailnet自动配置方案.md`](docs/Tailnet自动配置方案.md) 里选定的范围是
+**B1(origin 覆盖)+ C1(探测与命令生成)+ 一次性引导码(A1)**,本轮已实施。
+
+### ① 首位管理员的初始口令不再依赖日志
+
+- [x] **引导码文件** `app/bootstrap_access.py`(新增):处于初始口令状态时把 `sisi_boot_…`
+      写成 `${DATA_DIR}/bootstrap_code`(权限 600);`sync_code_state` 在每次启动引导后对齐
+      (待改密 → 确保在;已定稿 → 删掉),手工删掉也会在下次启动自愈
+- [x] **`GET/POST /bootstrap`**(`app/routers/auth.py`;裸路径与 `/calendar/bootstrap` 都注册):
+      可凭码自己设口令;限流 5 次/10 分钟、登录 CSRF 双击校验、码错 401、口令不合规 422、
+      **设置成功 → 文件删除 + 页面立刻 404 + 写审计**(不是常驻后门)
+- [x] **日志只写路径不写码**:`ensure_family_setup` 结尾的提示指向引导码文件与
+      `python -m app.cli bootstrap`,不再把一次性凭据摊在 `docker logs` 里
+- [x] **两条 CLI 兜底**(`app/cli.py`):`bootstrap`(查看 / `--rotate` 轮换,不需要口令)、
+      `reset-admin-password`(`--generate` 一次性口令 / `--password` 指定 / 交互式)
+- [x] **测试** `tests/test_bootstrap_access.py` **16 项**:文件只在初始状态存在、轮换使旧码失效、
+      首次随机口令启动确实落文件、通道关闭后 404、错码/口令不一致/缺 CSRF/限流/非 ASCII 码,
+      以及 CLI 两个子命令与「一次性口令能真的登录」
+- [x] **真机演练(2026-10-14,本机 uvicorn 等价流程)**:无 `ADMIN_PASSWORD` 启动 →
+      `reset-admin-password --generate` → `bootstrap` 打印码与完整地址 →
+      `GET /calendar/bootstrap?code=…` 200 → POST 设口令 → 303 →
+      文件已删、`/bootstrap` 404(裸与带前缀)→ 新口令登录 303 `/admin`;
+      证据见 `docs/验收测试记录.md` §3.10
+
+### ② 对外地址:界面只改 origin(免重启),路径前缀仍是环境变量
+
+- [x] **库里只存 origin**:`settings_store.PUBLIC_BASE_URL_KEY`,完整地址 = origin + 当前挂载前缀
+      (`compose_public_base_url`);**路径前缀永远来自环境变量**,所以以后改 `.env` 并重建容器
+      也不会带错路径(`effective_settings` 每次请求现拼)
+- [x] **校验**(`normalize_public_base_origin`):只收 http(s) + 主机名(+可选端口),省略路径或
+      只写 `/` 时按前缀补齐;写了别的路径、带 query/fragment/用户名口令、端口不是数字一律 422,
+      并说明「路径前缀只能改环境变量并重建容器」
+- [x] **两个保存入口**:设置页「对外地址(Tailscale)」卡片(与整页 include 共用同一套上下文,
+      避免 `StrictUndefined` 缺键 500)与 `PATCH /api/v1/settings`;清空 = 撤销覆盖、回到 env
+- [x] **自动检测 tailnet**:经 `*.ts.net` 域名访问时按 `Host` / `X-Forwarded-Proto` 填入候选地址;
+      从 localhost 进来则提示手动填写(转发头只是建议来源,不是安全判据)
+
+### ③ 宿主端口与 serve 命令(半自动,不碰整机配置)
+
+- [x] **「检测宿主端口映射」按钮**(`POST /admin/actions/host-port-check` →
+      `app/host_port.py::probe_host_port`):容器内只连 `host.docker.internal:<HOST_PORT>/healthz`
+      (主机名写死、端口只认 1–65535 的整数、路径写死),失败文案给出 `ports` / `HOST_PORT` /
+      `extra_hosts` 的修法;管理员点击才跑,只读
+- [x] **生成的 `tailscale serve` 命令端口正确**:端口取自 `HOST_PORT`(不再照抄文档里的 443),
+      路径取自挂载前缀,并附「先 `tailscale serve status` 留档」这一步
+- [x] **`compose.nas.yaml`**:增加 `HOST_PORT: "${HOST_PORT:-18443}"` 与
+      `extra_hosts: ["host.docker.internal:host-gateway"]`;`.env.example` 写明语义
+- [x] **测试** `tests/test_settings_public_base_url.py` **25 项**:origin 规范化与各类非法输入、
+      覆盖只改 origin 不改前缀、撤销覆盖回退 env、脏库值不破坏链接、API 与卡片两条路径、
+      tailnet 自动填入 vs localhost 手动填写、serve 命令跟随 `HOST_PORT`、探测的不可达文案与可达分支
+- [x] **真机演练(2026-10-14)**:经节点域名(curl `--resolve`)登录 → 卡片自动填入
+      `https://sisi-laptop.tail921448.ts.net` → 保存后生效值立刻变成
+      `https://…ts.net/calendar`(无需重启)→ 改路径 422 → 清空回退 env →
+      端口探测如实报「连不上」并给出 `extra_hosts` 提示
+
+### 本轮附带修掉的缺陷
+
+- [x] **`hmac.compare_digest` 的 ASCII 限制**:引导页里粘一段中文引导码原先会 **500** 而不是
+      「码错」——`verify_code` 改为两侧先按 UTF-8 编码成字节再比较,无法编码的输入判为不相等,
+      并补了单元与 HTTP 两层测试
+
+### 本轮遗留(明确未做,见下面的待办)
+
+- [ ] **同类的 `compare_digest` 写法还在别处**:`app/security.py`(CSRF 双提交、管理员用户名比较)、
+      `app/deps.py`(Bearer 令牌)、`app/email_verify.py`(6 位验证码)——非 ASCII 输入同样会
+      500 而不是 401/403/422。刻意不在本轮改(涉及鉴权核心),建议下一轮统一收口
+- [ ] **`compose_public_base_url` 不校验端口形态**:库里被手工写成 `https://node:abc` 时不回退
+      (只回退「完全不像 URL」的值);正常路径写不进这种值(保存时已 422)
+- [ ] **NAS 真机验证**:确认卡片自动填入的是 NAS 自己的 tailnet 节点名、端口探测对 18443
+      报「可达」、生成的 serve 命令能直接复制执行(本机演练不能替代)
+
 ## 本轮已完成(2026-10-14:GitHub Actions 自动构建镜像 → GHCR)
 
 需求:让 `master` 的提交自动构建成 Docker 镜像,NAS 直接 `pull` 就能部署与升级。计划文档
@@ -366,22 +441,25 @@
 
 ## 待办
 
-### 待决策:Tailnet 自动/半自动配置(2026-10-14 出设计稿)
+### 待决策:Tailnet 自动/半自动配置(2026-10-14 出设计稿,**第 1 期已实施**)
 
-设计稿:[`docs/Tailnet自动配置方案.md`](docs/Tailnet自动配置方案.md)(**未实施**,等你选边)。
-核心结论:**origin 可以运行时改(免重启),路径前缀不行**(它只在启动时挂载一次);
-`tailscale serve` 是整机配置,容器内只能「生成命令」,要全自动就得换部署形态(sidecar)。
+设计稿:[`docs/Tailnet自动配置方案.md`](docs/Tailnet自动配置方案.md)。核心结论:
+**origin 可以运行时改(免重启),路径前缀不行**(它只在启动时挂载一次);`tailscale serve`
+是整机配置,容器内只能「生成命令」,要全自动就得换部署形态(sidecar)。
 
-- [ ] **第 1 期(推荐先做)**:设置页可覆盖 `public_base_url` 的 **origin**(路径仍以 env 为唯一来源)
-      + 从请求推导 tailnet 地址的「一键采用」+ 容器内探
+- [x] **第 1 期(已实施,2026-10-14 第二轮)**:设置页可覆盖 `public_base_url` 的 **origin**
+      (路径仍以 env 为唯一来源)+ 从请求推导 tailnet 地址并自动填入 + 容器内探
       `host.docker.internal:$HOST_PORT/healthz` 验证宿主端口映射 + 生成端口正确的
-      `tailscale serve` 命令(含先快照)
+      `tailscale serve` 命令(含先快照)。详见本文件顶部的「2026-10-14 第二轮」记录
+- [x] **A1 一次性引导码(已实施)**:就是本轮 ① 的引导码文件 + `/bootstrap` + 两条 CLI;
+      原方案里 A2(受限默认口令)/ A3(首个注册者成为管理员)**明确不做**(公开仓库里
+      默认口令等于公开后门,A3 会让陌生人有管理员机会)
 - [ ] **第 2 期(可选)**:`scripts/tailscale-serve.ps1/.sh`,在宿主机读 `tailscale status --json`
       取 `Self.DNSName`,默认 dry-run,显式 `-Apply` 才执行
-- [ ] **第 3 期(可选,看决策)**:开箱管理员体验 —— A1 一次性引导码(推荐)/
-      A2 受限默认口令(必须 opt-in + 仅空库 + 强制改密 + 常驻横幅)/ A3 首个注册者成为管理员
 - [ ] **第 4 期(不建议默认)**:Tailscale sidecar + `TS_SERVE_CONFIG`,把 serve 变成「点一下生效」
       (代价:多一个 tailnet 节点、auth key、需启用 HTTPS 证书)
+- [ ] **下一轮的收口项**:`app/security.py` / `app/deps.py` / `app/email_verify.py` 里同类的
+      `compare_digest` ASCII 限制(非 ASCII 输入 500),与本轮 `verify_code` 的修法统一
 
 ### 家庭版遗留(按需再做)
 

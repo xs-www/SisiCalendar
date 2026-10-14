@@ -1,8 +1,9 @@
 # `app/urls.py`
 
 公开面的**路径前缀**与**链接拼装**。家庭成员用的所有地址都挂在 `PUBLIC_BASE_URL` 的
-路径部分下(默认 `/calendar`):`/calendar/register`、`/calendar/login`、`/calendar/admin/...`、
-`/calendar/verify-email`、`/calendar/api/...`、`/calendar/static/...` 以及每人的订阅地址
+路径部分下(默认 `/calendar`):`/calendar/register`、`/calendar/login`、
+`/calendar/verify-email`、`/calendar/bootstrap`、`/calendar/admin/...`、
+`/calendar/api/...`、`/calendar/static/...` 以及每人的订阅地址
 `/calendar/<令牌>.ics`。本机管理面(`http://localhost:443/admin`)仍走**裸路径**,
 两套路由同时注册(带前缀的那套 `include_in_schema=False`,见 `app/main.py:145`–`:155`)。
 
@@ -150,12 +151,17 @@
 
 - **位置**:`app/urls.py:85`
 - **用途**:判断是不是需要挂**严格 CSP** 的管理/登录页
-- **返回**:`relative(path).startswith(("/admin", "/login", "/register", "/verify-email"))`
+- **返回**:`relative(path).startswith(("/admin", "/login", "/register", "/verify-email", "/bootstrap"))`
+  (`app/urls.py:88`–`:90`;集合里最后一项 `/bootstrap` 是 2026-10-14 新增的)
 - **副作用**:无
 - **不变量**:判定是普通**前缀匹配**;集合里必须包含 `/verify-email`(验证页同样是
-  无内联脚本的表单页),漏掉它会让验证页失去 CSP
+  无内联脚本的表单页)与 **`/bootstrap`**(首位管理员的引导码设置页同样自带完整 HTML
+  shell、无内联脚本,见 `templates/bootstrap.html`),漏掉任何一个都会让它失去 CSP;
+  它们的判定都基于 `relative()`,所以 `/calendar/bootstrap` 这类带前缀入口也被算进来
 - **测试**:`tests/test_family_web.py::test_register_page_gets_csp`、
-  `tests/test_public_prefix.py::test_admin_pages_under_prefix_link_within_the_prefix`
+  `tests/test_public_prefix.py::test_admin_pages_under_prefix_link_within_the_prefix`、
+  `tests/test_bootstrap_access.py::test_bootstrap_page_serves_the_form_with_csp`
+  (引导页 200 且响应头含 `Content-Security-Policy`)
 - **调用方**:`app/main.py:165`(中间件据此设置 `Content-Security-Policy`)
 
 ### `invite_url(settings, code) -> str`
@@ -231,7 +237,9 @@
 - `relative()` 被直接断言的用例没有:它只经 `is_api_path` / `is_admin_path` 间接覆盖。
 - `normalize_prefix()` 对「非字符串输入」(`None`、数字)的归一化没有专门用例。
 - `is_admin_path()` 里 `/verify-email` 这一项没有直接断言 CSP 头的用例,
-  只有「验证页可以打开、页面表单可用」的间接覆盖。
+  只有「验证页可以打开、页面表单可用」的间接覆盖
+  (`/bootstrap` 这一项在 2026-10-14 有了直接断言:
+  `tests/test_bootstrap_access.py::test_bootstrap_page_serves_the_form_with_csp`)。
 - `url()` 对**不含前导斜杠**路径自动补齐的行为没有专门用例(调用方都传了 `/...`)。
 
 ## 变更记录
@@ -244,3 +252,9 @@
   路径分类(`is_api_path` / `is_admin_path`,决定错误响应形状与 CSP)、
   绝对地址派生(`invite_url` / `subscription_url`),以及 `/calendar` 前缀本身
   对日历客户端 404、对浏览器 303 的边界。
+- 2026-10-14:`is_admin_path` 的路径集合增加 **`/bootstrap`**
+  (`app/urls.py:88`–`:90`),首位管理员的引导码设置页因此也拿到严格 CSP;
+  `templates/bootstrap.html` 与 `app/routers/auth.py` 的两条 `/bootstrap` 路由都
+  按当前请求前缀渲染(`bp()` / `urls.url()`),带前缀入口 `/calendar/bootstrap` 同样可用。
+  见 [`app-bootstrap-access.md`](app-bootstrap-access.md)、
+  [`app-routers-auth.md`](app-routers-auth.md)。

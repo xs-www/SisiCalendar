@@ -39,7 +39,9 @@
 | 失败韧性 | 导出失败保留编辑、标记 `dirty`、每分钟自动修复,订阅端始终返回最近的有效文件 |
 | 邮件同步 | 持久化队列、`(版本, 收件人)` 幂等、逐人独立发送、退避重试、旧版附件隔离,队列显示操作/发送时间与**发起人**;**发信前自动对齐账号收件人**(成员邮箱验证通过即成为收件人,设置页只维护外部邮箱);**只通知看得见这次改动的收件人**;**按收件人范围出附件**(账号=本人可见日历,外部=家庭共享),附件只含尚未结束的日程;**正文标明本次操作是谁发起的**(新增/修改/删除日程;手动同步不标) |
 | 安全 | Argon2id 口令、签名会话、CSRF 双提交、注册限流、严格 CSP、口令与 SMTP 密码只从环境注入 |
-| 运维 | 健康/就绪检查、一致性自检、在线备份与恢复、Alembic 迁移、Docker Compose |
+| 口令与救援 | 首位管理员的口令只从环境注入、不落库;没配口令时**随机生成**并写一份**引导码文件**(`data/bootstrap_code`,不依赖 `docker logs`),凭它在 `/calendar/bootstrap` 自己设口令,设完文件删除、页面 404;口令彻底丢失用 `python -m app.cli reset-admin-password` 重置 |
+| 对外地址 | 登录后可在**设置 → 对外地址(Tailscale)** 改域名与端口(路径前缀仍由 `PUBLIC_BASE_URL` 决定);经 tailnet 域名访问时自动填入当前地址,保存后邀请链接/订阅地址/邮件地址立刻生效,不用重建容器 |
+| 运维 | 健康/就绪检查、一致性自检、在线备份与恢复、Alembic 迁移、Docker Compose;设置页可一键探测宿主端口映射是否真的通了 |
 | 远程 Agent | 可选的 Bearer 令牌接口,供外部 Agent 经 HTTP 新建日程;每枚令牌绑定一个账号与一条默认日历;默认关闭,幂等键防重试重复 |
 
 ### 谁能看到什么
@@ -168,7 +170,7 @@ PUBLIC_BASE_URL=http://127.0.0.1:8443/calendar
 ## 测试
 
 ```powershell
-uv run pytest -p no:randomly -q  # 450 项测试
+uv run pytest -p no:randomly -q  # 491 项测试
 uv run ruff check app tests      # 静态检查
 ```
 
@@ -177,6 +179,7 @@ uv run ruff check app tests      # 静态检查
 **账号收件人自动同步与「只通知看得见的人」**、
 时区序号解析、提醒(`VALARM`)取值与确定性导出、
 备份恢复往返;**公开面地址前缀与固定订阅地址、邮箱验证全流程、CLI 的 `DATA_DIR` 误指安全网**;
+**首位管理员的引导码救援通道(文件载体、关通道、CLI 兜底)与对外地址 origin 覆盖/tailnet 自动检测/宿主端口探测**;
 家庭版另有账号/日历/成员权限、可见性与越界 404/403、邀请码注册、
 订阅令牌与家庭订阅范围、按收件人范围出附件、Agent 令牌作用域等测试。
 验收标准逐条对照见 [`docs/验收测试记录.md`](docs/验收测试记录.md)。
@@ -297,6 +300,10 @@ docker compose up -d           # 不带 --build:同名镜像已存在,Compose �
   数据卷要随容器保留,换镜像**只换容器不换卷**。
 - **`data/session_secret` 不得删除或轮换**:它是所有固定订阅地址与邮箱验证码哈希的密钥,
   一换全家人的订阅地址立即失效(AGENTS.md 不变量 23)。
+- **`data/bootstrap_code` 是敏感文件**:能读到它就等于拿到一次改首位管理员口令的权限;
+  口令设完它会自动消失,别把内容粘进聊天记录或工单(见 §2.7 / §8.7)。
+- **`HOST_PORT` 要与 compose 的宿主端口一致**:它只影响设置页生成的 `tailscale serve`
+  命令与「检测宿主端口映射」,不改变容器监听(永远是 `PORT=8000`)。
 - **重建/升级前先备份**:`docker compose exec -T calendar python -m app.cli backup`。
 - **迁移只由容器启动流程执行**:不要在宿主机跑 `uv run alembic`,它写死 `./data/calendar.db`,
   会打到真实库(容器在跑时尤其危险)。
@@ -326,6 +333,36 @@ tailscale serve --bg --yes --https=443 --set-path=/calendar http://127.0.0.1:443
 > `/calendar`、`/calendar/`、`/calendar.ics` 都是 **404 纯文本**(订阅命名空间没被管理页污染,
 > 旧的无令牌地址也确实取消了)。会话密钥请留空交给 `${DATA_DIR}/session_secret` 生成,不要用短口令;
 > 注意**轮换该密钥会让所有固定订阅地址与验证码哈希一起失效**。
+
+### 初始口令与忘记口令(2026-10-14 新增)
+
+首位管理员的口令来自 `ADMIN_PASSWORD_HASH` > `ADMIN_PASSWORD` > `${DATA_DIR}/admin.hash` >
+**随机生成**(优先级从高到低)。落到最后一种时,明文只在启动日志里出现一次 —— 日志滚掉就没了,
+所以系统**同时写一份引导码文件**:
+
+```bash
+docker compose exec -T calendar cat /data/bootstrap_code       # 形如 sisi_boot_xxxxxxxx
+# 浏览器打开 <PUBLIC_BASE_URL>/bootstrap?code=<引导码>,自己设一个记得住的口令
+```
+
+- 引导码只在文件里(不进日志/数据库/邮件),权限 600;`python -m app.cli bootstrap --rotate` 可换一枚;
+- **口令一设成功,文件立刻删除、`/bootstrap` 立刻 404** —— 它不是常驻后门;
+- 口令**彻底丢了**(连 `.env` 里那行哈希的明文也想不起来)时:
+  `docker compose exec -T calendar python -m app.cli reset-admin-password --generate`
+  会打印一次性口令(登录后强制改密)。注意 `.env` 里的 `ADMIN_PASSWORD_HASH` 只在**第一次**创建
+  首位管理员时生效,对已有库改它没用。
+
+细节与真机演练记录见 [`docs/部署与运维.md`](docs/部署与运维.md) §2.7 与 §8.7。
+
+### 换对外地址不用重建容器(2026-10-14 新增)
+
+登录后进 **设置 → 对外地址(Tailscale)**:输入框里填 `https://<节点>[:端口]` 即可,
+**路径前缀**(`/calendar`)由 `PUBLIC_BASE_URL` 决定、界面改不了(路由是启动时按前缀挂载的)。
+如果你是经 tailnet 域名打开这一页的,候选地址会被**自动填入**;保存后邀请链接、每人的订阅地址、
+邮件正文里的地址**立刻**跟着变,不需要重启。卡片还会按 `.env` 里的 `HOST_PORT` 生成**端口正确**的
+`tailscale serve` 命令,并提供一个「检测宿主端口映射」按钮(容器内访问
+`host.docker.internal:<HOST_PORT>/healthz`,Linux/NAS 需要 `compose.nas.yaml` 里已经加好的
+`extra_hosts: host.docker.internal:host-gateway`)。
 
 完整步骤、Tailscale ACL、备份恢复、升级回滚与故障排查见
 [`docs/部署与运维.md`](docs/部署与运维.md)(§2.4.1 是 NAS 的端口、目录与权限,

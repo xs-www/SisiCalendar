@@ -78,8 +78,19 @@
   7. **`latest` 可被钉版本**:升级用 `latest`,回滚把 `image:` 改成 `:sha-<7位>` 或 `:1.2.3`。
   8. **不要改 `compose.yaml` 去引用 GHCR**:本机(Windows)那条路径保持本地构建,
      避免 `up -d` 因为镜像名变化而突然去拉远程镜像。
+  9. **`HOST_PORT` 与 `extra_hosts` 只服务设置页的「对外地址(Tailscale)」卡片**:
+     `environment.HOST_PORT: "${HOST_PORT:-18443}"`(`compose.nas.yaml:40`)让页面生成的
+     `tailscale serve` 命令端口正确(**不能照抄 443**:NAS 默认发布的是 18443),
+     `extra_hosts: ["host.docker.internal:host-gateway"]`(`:44`–`:45`)让容器内能探测
+     宿主端口映射是否真的通了(**管理员点一下才跑**,见
+     [`app-host-port.md`](app-host-port.md))。`.env` 没给 `HOST_PORT` 时用 compose
+     默认值 18443,与第 1 条的 `ports` 默认一致 —— **改 `ports` 的宿主端口时
+     要同时改 `HOST_PORT`**,否则设置页给出的命令会指向一个没人监听的端口。
+     这两项**不改变监听**:容器里永远是 `PORT=8000`,探测的主机名写死、端口只认整数。
+    `.env.example:41` 同样给了 `HOST_PORT`(默认 `443`,与 `compose.yaml` 一致;
+    用 `compose.nas.yaml` 时改成 18443)并写明「改了宿主的 `ports` 就要同步改这里」。
 - **测试**:无自动化测试;首次 NAS 部署按《部署与运维》§2.9 的清单人工验证
-- **变更记录**:2026-10-14 新建
+- **变更记录**:2026-10-14 新建;同日补充第 9 条(`HOST_PORT` 与 `extra_hosts`)
 
 ---
 
@@ -88,3 +99,17 @@
 - 设计与验收标准、风险与备选:[`../CI镜像自动发布计划.md`](../CI镜像自动发布计划.md)
 - 首次部署 / 升级 / 回滚的操作步骤:[`../部署与运维.md`](../部署与运维.md) §2.9、§5.1、§5.2
 - 面向 Agent 的最短路径与硬约束:`README.md`「部署」节
+- 宿主端口探测与「对外地址」卡片:[`app-host-port.md`](app-host-port.md)、
+  [`app-routers-pages.md`](app-routers-pages.md)
+
+## 变更记录
+
+- 2026-10-14:新建本文件(门禁 + 双架构镜像 + GHCR 拉取部署契约)。
+- 2026-10-14:`compose.nas.yaml` 的 `environment` 增加
+  `HOST_PORT: "${HOST_PORT:-18443}"`(`:40`),并新增
+  `extra_hosts: ["host.docker.internal:host-gateway"]`(`:44`–`:45`)——这两项**不改变监听**
+  (容器内永远是 `PORT=8000`),只服务设置页的「对外地址(Tailscale)」卡片:
+  `HOST_PORT` 决定生成的 `tailscale serve` 命令端口(NAS 上不能照抄 443),
+  `extra_hosts` 让容器能探测宿主端口映射(管理员点击才跑,只连
+  `host.docker.internal:<HOST_PORT>/healthz`,见 [`app-host-port.md`](app-host-port.md));
+  改 `ports` 的宿主端口时必须同步改 `HOST_PORT`。

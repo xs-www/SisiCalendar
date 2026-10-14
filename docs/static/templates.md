@@ -24,6 +24,7 @@ templates/
 ├─ login.html                 登录(含「去注册」入口)
 ├─ register.html              邀请码注册(邮箱必填)
 ├─ verify_email.html          邮箱验证(验证码 / 重发 / 改地址 / 退出)
+├─ bootstrap.html             首位管理员引导码设口令(初始口令救援,自带 HTML shell)
 ├─ me.html  members.html  settings.html  sync.html        各整页
 └─ partials/
    ├─ me.html                 资料 / 改口令 / 我的订阅地址(含验证状态块)
@@ -420,6 +421,55 @@ templates/
   `::test_resend_cooldown_then_new_code`(按钮的 `resend_wait` 禁用态)、
   `::test_can_fix_a_mistyped_email_from_the_verify_page`(改地址表单)
 
+## `templates/bootstrap.html`(2026-10-14 新增)
+
+- **用途**:首位管理员的「设置管理员口令」页。只在初始口令救援通道开着
+  (`app/bootstrap_access.py::pending_owner` 非空)时由 `GET /bootstrap` 渲染;
+  口令一设置,通道关闭,这个地址立刻 404(见
+  [`app-routers-auth.md`](app-routers-auth.md)、[`app-bootstrap-access.md`](app-bootstrap-access.md))
+- **结构**:整页**自带完整 HTML shell**(**不** `extends base.html`,与
+  `login.html` / `register.html` / `verify_email.html` 同款),`<body class="login-body">`
+  里一个 `<form class="login-card" method="post" action="{{ bp() }}/bootstrap">`(`:10`):
+  - **隐藏字段**(`:20`):`<input type="hidden" name="csrf_token" value="{{ login_csrf }}">`
+    ——用的是**登录专用** CSRF(与登录/注册页同一套「双提交 + 服务端签名」,
+    不是 `base.html` 的 `csrf_token`),服务端由
+    `app/routers/auth.py::bootstrap_submit` 的 `verify_login_csrf` 校验;
+  - **字段三个**(顺序即页面顺序):`code`(`:23`,`type="text"`、`autocomplete="off"`、
+    `autofocus`、`required`,**预填 URL 上的 `?code=`**)、
+    `password`(`:31`,`type="password"`、`autocomplete="new-password"`、`required`)、
+    `password_confirm`(`:34`,同上);
+  - **提示区**(`:17`–`:18`):`notice` / `error` 两个 `alert` 块(401/422 的错误文案就渲染在这里);
+  - **引导码文件路径**(`:26`–`:28`):正文给出 `{{ code_file }}`,
+    以及容器里的读法 `docker compose exec calendar cat {{ code_file }}`
+    ——**只给路径,不显示码本身**(码要靠管理员自己去文件里读,或从地址栏带进来);
+  - **按钮与结尾提示**(`:37`–`:41`):「设置口令并关闭引导通道」;底部写明
+    「设置成功后引导码文件会被删除,这个地址也随之失效」,并给出
+    `python -m app.cli reset-admin-password` 作为忘记口令时的兜底
+  - 样式引用 `{{ asset('css/app.css') }}`(`:7`,带内容指纹,同 2026-10-12 第三轮的约定)
+- **上下文**(`app/routers/auth.py::_bootstrap_context`,`:621`):`request`、`error`、
+  `notice`、`code`、`login_csrf`、`calendar_name`、`code_file`、`cookie_name`、
+  `cookie_value`。**注意**:与 `register.html` 不同,本模板**没有渲染 `cookie_value`**
+  ——`cookie_value` 仍被喂进来(与 `_login_context` 保持一致),但页面只输出
+  `csrf_token` 这一个隐藏字段,双击校验靠 `GET /bootstrap` 写下的
+  `sisi_login_csrf` Cookie(`app/routers/auth.py:658`)
+- **不变量**:
+  - 表单必须 POST 到 **`{{ bp() }}/bootstrap`**(跟随当次请求前缀,带前缀入口下就是
+    `/calendar/bootstrap`),不得写死裸路径;
+  - **不使用内联脚本**:模板里没有 `<script>`、也没有事件属性;严格 CSP 由
+    `app/urls.py::is_admin_path` 的集合含 `/bootstrap` 保证(见
+    [`app-urls.md`](app-urls.md));
+  - 引导码明文在页面里**只能**作为 `code` 输入框的预填值出现,不得写进
+    `data-*`、注释或任何 JS 可见的位置;模板不得自己去读文件;
+  - 页面上**不得**出现任何「跳过引导、直接进管理面」的链接(它只有一个出口:
+    设置成功后的 303 到 `/login`)
+- **测试**:`tests/test_bootstrap_access.py::test_bootstrap_page_serves_the_form_with_csp`
+  (200 + `Content-Security-Policy` 头 + URL 上的码出现在页面里 + 带前缀入口同样 200)、
+  `::test_setting_the_password_closes_the_channel`(用页面里的 `csrf_token` 提交成功)、
+  `::test_bootstrap_rejects_a_missing_csrf_token`(表单的 CSRF 是真校验,不是装饰)
+- **未覆盖**:「模板里没有内联脚本」这一条**没有**专门断言——
+  `tests/test_family_pages.py::_assert_no_inline_script` 只遍历成员/管理页与片段,
+  不包含 `/bootstrap`;引导页也没有进入 `tests/test_page_security.py::CSP_PAGES`。
+
 ## `templates/partials/settings_form.html`
 
 - **变更**:「默认时区」由 `<input list="tz-list-settings">` 改为按地区分组的 `<select name="default_timezone">`
@@ -494,6 +544,10 @@ templates/
   覆盖的是订阅地址来源,不是 `base.html` 页脚那一行。
   (2026-10-12 第二轮已补 `tests/test_family_pages.py::test_footer_and_sync_partial_show_the_public_base_url`,
   它断言页脚出现 `<基地址>/login`、同步面板出现「公开面基地址」。)
+- **`/bootstrap` 没有进 CSP 兜底清单**(2026-10-14):`tests/test_page_security.py::CSP_PAGES`
+  与 `tests/test_family_pages.py::_assert_no_inline_script` 都不包含它,
+  严格 CSP 只有 `tests/test_bootstrap_access.py::test_bootstrap_page_serves_the_form_with_csp`
+  一条断言(只查响应头,不查页面里有没有内联脚本);引导页同样自带完整 HTML shell。
 
 ## 变更记录
 
@@ -546,3 +600,10 @@ templates/
   - 测试:`tests/test_family_pages.py::test_sidebar_primary_action_is_a_proper_button`、
     `::test_static_assets_carry_a_version_stamp`、`::test_feed_cards_offer_a_copy_button`、
     `::test_new_token_reveals_offer_a_copy_button`
+- 2026-10-14:首位管理员引导码。新增整页 `templates/bootstrap.html`(设置管理员口令:
+  隐藏 `csrf_token` = 登录 CSRF、三个字段 `code` / `password` / `password_confirm`、
+  只展示引导码**文件路径**、按钮「设置口令并关闭引导通道」),并补进模板清单;
+  站内链接走 `bp()`、样式走 `asset()`、**无内联脚本**(严格 CSP 由
+  `app/urls.py::is_admin_path` 新增的 `/bootstrap` 保证);
+  写明它与 `register.html` 的差异(**没有渲染 `cookie_value`**);
+  「测试缺口」补一条:引导页没有进 CSP 兜底清单。
