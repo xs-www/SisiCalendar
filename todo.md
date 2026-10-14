@@ -24,10 +24,19 @@
       与 `compose.yaml` 逐字对齐;**现有 `compose.yaml` 不动**(本机本地构建路径不受影响)
 - [x] **文档**:README 部署节改成「路径 1 拉镜像 / 路径 2 源码构建 / 路径 3 离线 tar」;
       《部署与运维》新增 §2.9 并在 §5.1 / §5.2 补拉取式升级与回滚(`session_secret` 随卷保留)
-- [ ] **GHCR 包可见性(需用户操作)**:包默认私有,要么在包设置里改成 Public(NAS 免登录拉取),
-      要么给目标机器配一个勾了 `read:packages` 的 PAT
+- [x] **CI 绿 + 产物核对(2026-10-14)**:run
+      [`38542329352`](https://github.com/xs-www/SisiCalendar/actions/runs/38542329352) 两个 job
+      全步成功(门禁 + 双架构构建推送);`docker manifest inspect` 匿名成功 → OCI index 恰好
+      `linux/amd64` + `linux/arm64`,`latest` / `master` / `sha-f7f40b1` 三个标签可用
+- [x] **GHCR 包可见性**:实测**已是 public**(未登录 `ghcr.io` 也能 `manifest inspect` 与 `pull`),
+      NAS 免登录拉取,原计划的「改成 Public」这一步不需要做;若日后改回私有,
+      按《部署与运维》§2.9 的 PAT 备选路径处理
+- [x] **本机冒烟(拉 CI 产物,不是本地构建)**:容器 `Up (healthy)`,迁移跑到 `0008`,
+      `/healthz` 200、`/readyz` 200、`/calendar/login` 200、`/calendar` 404 纯文本、
+      `/calendar/admin` 303;证据见 `docs/验收测试记录.md` §3.9
 - [ ] **NAS 真机首次部署(需用户操作)**:按《部署与运维》§2.9 走一遍,记录 `ps` / `/healthz` /
-      `/calendar/login` / `/calendar` 404 纯文本的实测结果
+      `/calendar/login` / `/calendar` 404 纯文本的实测结果(本机冒烟不能替代 NAS 卷权限、
+      端口占用与 Tailscale 挂载的验证)
 
 ## 本轮已完成(2026-10-12 第五轮:同步邮箱收敛到外部邮箱 + 只通知「看得见的人」)
 

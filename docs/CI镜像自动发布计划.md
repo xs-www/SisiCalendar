@@ -153,11 +153,12 @@ cache-to: type=gha,mode=max
 
 ## 5. 需要人工做的一次性动作
 
-1. **首次 workflow 成功后把包设为公开**(NAS 才能免登录拉取):
+1. **包可见性:实测已是公开可拉取,这一步不需要做**(2026-10-14 在未登录 `ghcr.io` 的机器上
+   `docker manifest inspect` 匿名成功)。若日后改回私有,要么在
    `https://github.com/users/xs-www/packages/container/sisicalendar/settings`
-   → Change visibility → Public。
-   私有包则 NAS 需要 `docker login ghcr.io -u xs-www -p <PAT>`,
-   PAT 勾 `read:packages`(写进运维文档的备选路径)。
+   把可见性设成 Public,要么给目标机器配
+   `docker login ghcr.io -u xs-www -p <PAT>`(PAT 勾 `read:packages`);
+   运维文档 §2.9 写了这两条备选路径。
 2. 无需在 GitHub 配置任何 Repository secret(`GITHUB_TOKEN` 自带 `packages: write`)。
 3. NAS 首次部署:建目录 → `.env` → `mkdir -p data && sudo chown -R 10001:10001 data`
    → `docker compose -f compose.nas.yaml pull && docker compose -f compose.nas.yaml up -d`。
@@ -179,10 +180,16 @@ cache-to: type=gha,mode=max
       补拉取式升级(`backup` → `pull` → `up -d --force-recreate`)与回滚(钉 `sha-*`)
 - [x] 新建 `docs/static/ci-docker-publish.md`,并在 `docs/static/README.md` 索引与本轮变更登记
 - [x] `todo.md` 登记本轮
-- [ ] 提交并推送 `master`,在 Actions 页面确认两个 job 绿、GHCR 出现 `latest` 与 `sha-*`
-- [ ] `docker manifest inspect ghcr.io/xs-www/sisicalendar:latest` 确认同时含 `amd64`/`arm64`
-- [ ] 在 NAS 上按文档走一遍首次部署,记录 `ps` / `/healthz` / 前缀路径的实测结果
-      (需要在目标机器上执行;GHCR 包可见性也要先改成 Public 或配 `read:packages` 的 PAT)
+- [x] 提交并推送 `master`,在 Actions 页面确认两个 job 绿、GHCR 出现 `latest` 与 `sha-*`
+      → run [`38542329352`](https://github.com/xs-www/SisiCalendar/actions/runs/38542329352)
+      两个 job 全步成功(首次运行 `38542033308` 因 `setup-uv@v10` 无法解析而失败,见第 10 节)
+- [x] `docker manifest inspect ghcr.io/xs-www/sisicalendar:latest` 确认同时含 `amd64`/`arm64`
+      → 匿名成功(说明包已公开):OCI index 里 `linux/amd64` 与 `linux/arm64` 各一条,
+      `latest` / `master` / `sha-f7f40b1` 三个标签都可用
+- [x] 本地冒烟:拉取**真实 CI 产物**起容器,`Up (healthy)`,迁移跑到 `0008`,
+      `/healthz` 200、`/calendar/login` 200、`/calendar` 404 纯文本(见第 10 节)
+- [ ] 在 **NAS 真机**上按《部署与运维》§2.9 走一遍(需要用户执行;本机冒烟用的是
+      Docker Desktop 绑定挂载,不能替代对 NAS 卷权限、18443 端口占用与 Tailscale 挂载的验证)
 
 ---
 
@@ -224,3 +231,57 @@ cache-to: type=gha,mode=max
 - 不做自动部署到 NAS(不引入 Watchtower 之类自动升级:本项目升级前要人工备份,
   自动拉取会绕过这条纪律)。
 - 不在 CI 里构建单架构以外的任何东西(如 Windows 容器镜像)。
+
+---
+
+## 10. 实施结果与排错记录(2026-10-14)
+
+### 10.1 CI 运行
+
+| 运行 | 结论 | 说明 |
+|---|---|---|
+| [`38542033308`](https://github.com/xs-www/SisiCalendar/actions/runs/38542033308) | **失败** | 首次运行:门禁 job 在 `Set up job` 就失败,`image` job 被跳过 |
+| [`38542329352`](https://github.com/xs-www/SisiCalendar/actions/runs/38542329352) | **成功** | 门禁 job 全步通过(检出 → 装 uv/Python → `uv sync --frozen` → ruff → pytest);构建 job 全步通过(QEMU → Buildx → 登录 GHCR → metadata → 构建并推送 → 摘要) |
+
+**排错记录**:首次失败原因是
+`Unable to resolve action astral-sh/setup-uv@v10, unable to find version v10`
+——该仓库**不发布浮动主版本标签**,只有 `vX.Y.Z`(最高浮动标签只到 `v7.6`)。
+修正为钉 `@v10.3.0`(它的 release 标了 `immutable`)。当时把用到的七个 Action 标签都用
+`GET /repos/{owner}/{repo}/git/ref/tags/{tag}` 验了一遍,其余六个(`checkout@v7`、
+`setup-qemu@v4`、`setup-buildx@v4`、`login@v4`、`metadata@v6`、`build-push@v7`)都存在浮动主版本。
+
+### 10.2 产物(GHCR)
+
+- 镜像:`ghcr.io/xs-www/sisicalendar`,标签 `latest` / `master` / `sha-f7f40b1` 均可用
+- **匿名可拉取**:在未登录 `ghcr.io` 的机器上 `docker manifest inspect` 直接成功,
+  说明包已是 public —— 第 5 节第 1 条的一次性操作实际不需要做
+- manifest 是 OCI image index,**恰好两条**:`linux/amd64`、`linux/arm64`
+  (`provenance: false` / `sbom: false` 生效,没有 attestation 清单)
+
+### 10.3 本机冒烟(拉的是 CI 产物,不是本地构建)
+
+| 检查 | 实测 |
+|---|---|
+| 镜像 | `ghcr.io/xs-www/sisicalendar:latest`,digest `sha256:2c65f2b1…` |
+| 容器 | `Up (healthy)` |
+| 迁移 | `0005_family_accounts -> 0006_recipient_scope` → `0007_email_verification` → `0008_delivery_actor`,`Application startup complete`,无 `Traceback` |
+| 引导 | `已创建首位管理员账号:admin`;`已生成新的会话密钥并保存到 /data/session_secret` |
+| `/healthz` | `200 application/json` |
+| `/readyz` | `200 application/json` |
+| `/calendar/login` | `200 text/html; charset=utf-8` |
+| `/calendar` | `404 text/plain; charset=utf-8`,正文是「此地址不再提供日历…」 |
+| `/calendar/admin` | `303`(未登录跳转) |
+| `/calendar/static/css/app.css` | `200 text/css; charset=utf-8` |
+
+**冒烟踩的坑(值得记下)**:第一次把 `PUBLIC_BASE_URL` 写成不带路径的
+`http://127.0.0.1:18080`,结果 `/calendar/login` 返回 `404 application/json`
+——公开面的前缀**来自 `PUBLIC_BASE_URL` 的路径部分**(AGENTS.md 不变量 8),
+写成不带 `/calendar` 就等于把公开面挂在裸路径上。带上前缀后全部符合预期。
+
+### 10.4 仍未验证
+
+- **NAS 真机部署**:本机冒烟走的是 Docker Desktop 绑定挂载,不能替代对 NAS 卷权限
+  (`chown 10001:10001`)、18443 端口占用、Tailscale `/calendar` 挂载的验证。
+  按《部署与运维》§2.9 执行后,把结果补回第 6 节清单。
+- **PR 路径与 `v*` tag 路径**:本轮只触发了 `push master`;PR「只构建不推送」与
+  tag 产出的语义化版本号尚未实际用到(逻辑已按第 3 节的契约写死)。
