@@ -33,7 +33,7 @@ GitHub Container Registry(GHCR),NAS 侧只需 `pull` 就能部署与升级,不�
 | Action | 已核到的最新版 | 计划固定为 |
 |---|---|---|
 | `actions/checkout` | v7.0.1 | `@v7` |
-| `astral-sh/setup-uv` | v10.3.0 | `@v10` |
+| `astral-sh/setup-uv` | v10.3.0 | `@v10.3.0`(**该仓库没有浮动主版本标签,`@v10` 解析失败**) |
 | `docker/metadata-action` | v6.2.0 | `@v6` |
 | `docker/build-push-action` | v7.4.0 | `@v7` |
 | `docker/setup-qemu-action` | **待核** | 实施时用 API 取当前主版本 |
@@ -169,6 +169,9 @@ cache-to: type=gha,mode=max
 - [x] 用 GitHub API 核 `setup-qemu-action` / `setup-buildx-action` / `login-action` 主版本
       → 2026-10-14 核到 **qemu v4.4.0 / buildx v4.4.1 / login v4.6.0**
       (同日复核:checkout v7.0.1、setup-uv v10.3.0、metadata v6.2.0、build-push v7.4.0)
+- [x] **七个版本标签逐个验存在**(`GET /repos/{owner}/{repo}/git/ref/tags/{tag}`):
+      只有 `astral-sh/setup-uv` 没有浮动 `v10`,必须钉 `@v10.3.0`
+      —— 首次运行的 `Set up job` 失败正是这个原因,见第 10 节的排错记录
 - [x] 新建 `.github/workflows/docker-publish.yml`(第 3 节)
 - [x] 新建 `compose.nas.yaml`(第 4 节)
 - [x] `README.md` 部署节改为三条路径:路径 1 拉镜像 / 路径 2 源码构建 / 路径 3 离线 tar

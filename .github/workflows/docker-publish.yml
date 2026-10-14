@@ -33,7 +33,9 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v7
       - name: 安装 uv 与 Python
-        uses: astral-sh/setup-uv@v10
+        # 这个 Action 不发布浮动主版本标签(v10 不存在,只有 v10.x.y),故钉精确版本;
+        # 它的 release 是 immutable 的,钉住即长期稳定
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true

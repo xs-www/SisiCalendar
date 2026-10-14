@@ -12,6 +12,9 @@
       `ghcr.io/xs-www/sisicalendar`(标签 `latest` / `master` / `sha-<7位>`;`v*` tag 出语义化版本号)
 - [x] **Action 主版本用 GitHub API 核过(2026-10-14)**:checkout v7、setup-uv v10、
       setup-qemu v4、setup-buildx v4、login v4、metadata v6、build-push v7
+- [x] **首次运行排错**:`astral-sh/setup-uv@v10` 无法解析(`v10` 不是该仓库的浮动标签,
+      最高浮动只到 `v7.6`)→ 改为钉精确版本 `@v10.3.0`;其余六个 Action 的主版本标签
+      已逐个用 `git/ref/tags` 接口验过存在
 - [x] **不引入任何自定义 secret**:登录 GHCR 用自带的 `GITHUB_TOKEN`(`packages: write`
       只给 `image` job;顶层 `permissions: contents: read`)
 - [x] **照顾老 NAS**:`provenance: false` / `sbom: false`(attestation 清单会让部分老设备报

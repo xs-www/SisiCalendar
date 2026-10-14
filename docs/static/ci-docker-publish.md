@@ -41,8 +41,13 @@
      不依赖 `metadata-action` 的自动转换(GHCR 拒绝大写仓库名)。
   3. **`provenance: false` / `sbom: false` 必须保留**:attestation 清单会让部分老 NAS 的
      Docker 报 `manifest unknown`。打开它们等于放弃对这些设备拉取的支持。
-  4. **Action 主版本**:`checkout@v7`、`setup-uv@v10`、`setup-qemu@v4`、`setup-buildx@v4`、
-     `login@v4`、`metadata@v6`、`build-push@v7`(2026-10-14 核对)。
+  4. **Action 版本**:`checkout@v7`、`setup-qemu@v4`、`setup-buildx@v4`、`login@v4`、
+     `metadata@v6`、`build-push@v7` 用浮动主版本标签(2026-10-14 逐个用
+     `GET /repos/{owner}/{repo}/git/ref/tags/{tag}` 验过存在);
+     **`astral-sh/setup-uv` 必须钉精确版本 `@v10.3.0`** —— 该仓库不发布浮动主版本标签
+     (`v10` 不存在,最高浮动标签只到 `v7.6`),写成 `@v10` 会让 job 在 `Set up job` 阶段直接失败
+     (`Unable to resolve action astral-sh/setup-uv@v10, unable to find version v10`)。
+     它的 release 标了 `"immutable": true`,所以钉精确版本是稳定且更安全的做法。
   5. **`latest` 只跟默认分支**:推送 tag 不移动 `latest`;要发布版就显式钉版本号。
   6. 镜像里**不得**出现 `data/`、`.env`、`*.db`:由 `.dockerignore` 保证,改动它要重新确认。
 - **测试**:无自动化测试(工作流本身靠首次运行与 PR 构建验证);
