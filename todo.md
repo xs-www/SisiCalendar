@@ -1,5 +1,31 @@
 # TODO
 
+## 本轮已完成(2026-10-14:GitHub Actions 自动构建镜像 → GHCR)
+
+需求:让 `master` 的提交自动构建成 Docker 镜像,NAS 直接 `pull` 就能部署与升级。计划文档
+[`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md)(已实施),链路契约
+[`docs/static/ci-docker-publish.md`](docs/static/ci-docker-publish.md)。
+
+- [x] **新增 CI 流水线** `.github/workflows/docker-publish.yml`:`quality` job 先跑
+      `uv sync --frozen` + `ruff check app tests migrations` + `pytest -q` 门禁,
+      `needs: quality` 的 `image` job 再构建 `linux/amd64` + `linux/arm64` 并推送到
+      `ghcr.io/xs-www/sisicalendar`(标签 `latest` / `master` / `sha-<7位>`;`v*` tag 出语义化版本号)
+- [x] **Action 主版本用 GitHub API 核过(2026-10-14)**:checkout v7、setup-uv v10、
+      setup-qemu v4、setup-buildx v4、login v4、metadata v6、build-push v7
+- [x] **不引入任何自定义 secret**:登录 GHCR 用自带的 `GITHUB_TOKEN`(`packages: write`
+      只给 `image` job;顶层 `permissions: contents: read`)
+- [x] **照顾老 NAS**:`provenance: false` / `sbom: false`(attestation 清单会让部分老设备报
+      `manifest unknown`);PR 上只构建不推送
+- [x] **新增 `compose.nas.yaml`(纯拉取)**:`image:` 替代 `build:`,服务名仍为 `calendar`,
+      端口只绑 `127.0.0.1:18443:8000`,资源上限 / 健康检查 / `no-new-privileges` / 日志轮转
+      与 `compose.yaml` 逐字对齐;**现有 `compose.yaml` 不动**(本机本地构建路径不受影响)
+- [x] **文档**:README 部署节改成「路径 1 拉镜像 / 路径 2 源码构建 / 路径 3 离线 tar」;
+      《部署与运维》新增 §2.9 并在 §5.1 / §5.2 补拉取式升级与回滚(`session_secret` 随卷保留)
+- [ ] **GHCR 包可见性(需用户操作)**:包默认私有,要么在包设置里改成 Public(NAS 免登录拉取),
+      要么给目标机器配一个勾了 `read:packages` 的 PAT
+- [ ] **NAS 真机首次部署(需用户操作)**:按《部署与运维》§2.9 走一遍,记录 `ps` / `/healthz` /
+      `/calendar/login` / `/calendar` 404 纯文本的实测结果
+
 ## 本轮已完成(2026-10-12 第五轮:同步邮箱收敛到外部邮箱 + 只通知「看得见的人」)
 
 > 文档编号对照:本仓库的《开发文档》与《验收测试记录》里没有单独的「界面可用性」轮,
@@ -327,21 +353,6 @@
       (`test_mail_actor.py::test_member_edit_mail_names_the_member_display_name`),未在真机人工复现
 
 ## 待办
-
-### 待实施:GitHub Actions 自动构建镜像 → GHCR(2026-10-14 起草,**未开工**)
-
-计划落盘在 [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md):`master` 提交后由
-Actions 跑 ruff + pytest 门禁,再出 `linux/amd64` + `linux/arm64` 双架构镜像推到
-`ghcr.io/xs-www/sisicalendar`,NAS 侧用新的 `compose.nas.yaml` 直接 `pull` 部署。
-**目前仓库里还没有 `.github/workflows/` 与 `compose.nas.yaml`,也还没改任何代码**;
-细节、验收标准与「不做的事」见该计划文件。
-
-- [ ] 新建 `.github/workflows/docker-publish.yml`(门禁 job + 多架构构建 job)
-- [ ] 新建 `compose.nas.yaml`(纯拉取,服务名仍叫 `calendar`)
-- [ ] README / `docs/部署与运维.md` 补「从 GHCR 拉取镜像部署到 NAS」
-- [ ] `docs/static/ci-docker-publish.md` + 索引登记;`todo.md` 改「已实施」
-- [ ] 首次推送后把 GHCR 包可见性设为 Public(NAS 免登录拉取)
-- [ ] NAS 实测:`Up (healthy)`、`/healthz` 200、`/calendar/login` 200、`/calendar` 404 纯文本
 
 ### 家庭版遗留(按需再做)
 

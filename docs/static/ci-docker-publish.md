@@ -1,0 +1,85 @@
+# `.github/workflows/docker-publish.yml` + `compose.nas.yaml`(交付链路契约)
+
+本文件记录「提交 → 门禁 → 双架构镜像 → GHCR → NAS 拉取」这条链路的**契约**:
+触发条件、标签规则、平台、权限与不可改动的约束。改动这条链路前先看这里,
+设计与验收标准见 [`../CI镜像自动发布计划.md`](../CI镜像自动发布计划.md),
+运维步骤见 [`../部署与运维.md`](../部署与运维.md) §2.9 / §5.1 / §5.2。
+
+它不产出应用内函数,所以下面按「产物 + 契约字段」而不是按函数签名记录。
+
+---
+
+## `docker-publish.yml`(GitHub Actions)
+
+- **位置**:`.github/workflows/docker-publish.yml`
+- **用途**:`master` 每次推送后跑门禁,再构建 `linux/amd64` + `linux/arm64` 镜像并推送到 GHCR
+- **触发**:
+
+  | 事件 | 行为 |
+  |---|---|
+  | `push` 到 `master` | 门禁 + 构建 + 推送(`latest` / `master` / `sha-<7位>`) |
+  | `push` tag `v*` | 门禁 + 构建 + 推送(`1.2.3` / `1.2` / `1` / `sha-<7位>`) |
+  | `pull_request` → `master` | 门禁 + **只构建、不推送**(验证 Dockerfile 没被改坏) |
+  | `workflow_dispatch` | 同 `master`(手动补一次) |
+
+- **并发**:`group: docker-${{ github.ref }}` + `cancel-in-progress: true`
+  ——同一 ref 连续提交只跑最后一次;跨分支互不干扰
+- **权限**:顶层 `contents: read`;`packages: write` 只给 `image` job
+  ——**不需要任何自定义 secret**,登录用自带的 `secrets.GITHUB_TOKEN`
+- **job `quality`(门禁)**:`uv sync --frozen` → `uv run ruff check app tests migrations`
+  → `uv run pytest -q`;`timeout-minutes: 20`
+- **job `image`**:`needs: quality` → QEMU → Buildx → 登录 GHCR → metadata → build-push;
+  `timeout-minutes: 45`
+- **平台**:`linux/amd64,linux/arm64`(arm64 走 QEMU,构建明显慢于 amd64)
+- **缓存**:`cache-from/to: type=gha,mode=max`
+- **返回**:无(流水线产物是 GHCR 里的镜像与 OCI 标签)
+- **副作用**:向 `ghcr.io/xs-www/sisicalendar` 推送镜像;PR 上无副作用
+- **不变量**:
+  1. **门禁是硬前置**:`quality` 失败时 `image` 不执行,坏提交永远不会变成 `latest`
+     ——这是本链路唯一防止「未通过测试的代码上机」的机制,不要改成 `continue-on-error`。
+  2. **镜像名必须小写**:`ghcr.io/xs-www/sisicalendar` 写死在 `env.IMAGE_NAME`,
+     不依赖 `metadata-action` 的自动转换(GHCR 拒绝大写仓库名)。
+  3. **`provenance: false` / `sbom: false` 必须保留**:attestation 清单会让部分老 NAS 的
+     Docker 报 `manifest unknown`。打开它们等于放弃对这些设备拉取的支持。
+  4. **Action 主版本**:`checkout@v7`、`setup-uv@v10`、`setup-qemu@v4`、`setup-buildx@v4`、
+     `login@v4`、`metadata@v6`、`build-push@v7`(2026-10-14 核对)。
+  5. **`latest` 只跟默认分支**:推送 tag 不移动 `latest`;要发布版就显式钉版本号。
+  6. 镜像里**不得**出现 `data/`、`.env`、`*.db`:由 `.dockerignore` 保证,改动它要重新确认。
+- **测试**:无自动化测试(工作流本身靠首次运行与 PR 构建验证);
+  门禁效果按计划 §7「门禁有效性」人工验证一次即可
+- **变更记录**:2026-10-14 新建(门禁 + 双架构 + GHCR)
+
+---
+
+## `compose.nas.yaml`(NAS 拉取式部署)
+
+- **位置**:`compose.nas.yaml`
+- **用途**:在不需要代码仓库与构建工具的机器上,从 GHCR 拉取镜像并运行
+- **参数**:无(读同目录 `.env`;`env_file: .env`)
+- **返回**:无
+- **副作用**:创建/替换容器 `sisi-calendar`;读写宿主 `./data`
+- **不变量**(与 `compose.yaml` **逐字对齐**,只有 `build:` → `image:` 这一处不同):
+  1. **端口只绑回环**:`"127.0.0.1:18443:8000"`。省略 `127.0.0.1` 会让 Docker 绑定
+     `0.0.0.0`,把管理面暴露到整个局域网——这是安全边界,不是可选项。
+     NAS 上 443 常被管理界面占用,故默认 18443(宿主端口可按需改,回环地址不能丢)。
+  2. **`data/` 用宿主绑定挂载且必须在本地卷**:`./data:/data`。SQLite 需要真实文件锁,
+     不得放在 SMB/NFS 上。
+  3. **非 root 运行**:镜像以 `10001:10001` 运行,首次启动前 `chown -R 10001:10001 data`。
+  4. **资源与回收约束不得放宽**:`mem_limit: 256m`、`cpus: 0.50`、`pids_limit: 64`、
+     `stop_grace_period: 30s`、`no-new-privileges:true`、日志 `10m × 5`、`restart: unless-stopped`。
+  5. **健康检查固定打 `/healthz`**:与 Dockerfile 的 `HEALTHCHECK` 一致。
+  6. **服务名保持 `calendar`**:《部署与运维》里所有 `docker compose exec calendar …`
+     都依赖它;改名会让文档里的运维命令全部失效。
+  7. **`latest` 可被钉版本**:升级用 `latest`,回滚把 `image:` 改成 `:sha-<7位>` 或 `:1.2.3`。
+  8. **不要改 `compose.yaml` 去引用 GHCR**:本机(Windows)那条路径保持本地构建,
+     避免 `up -d` 因为镜像名变化而突然去拉远程镜像。
+- **测试**:无自动化测试;首次 NAS 部署按《部署与运维》§2.9 的清单人工验证
+- **变更记录**:2026-10-14 新建
+
+---
+
+## 与其它文档的分工
+
+- 设计与验收标准、风险与备选:[`../CI镜像自动发布计划.md`](../CI镜像自动发布计划.md)
+- 首次部署 / 升级 / 回滚的操作步骤:[`../部署与运维.md`](../部署与运维.md) §2.9、§5.1、§5.2
+- 面向 Agent 的最短路径与硬约束:`README.md`「部署」节

@@ -66,6 +66,12 @@
 | [`app-sync-service.md`](app-sync-service.md) | `app/sync_service.py`(`publish` 的多目标编排与发起人参数) |
 | [`app-mailqueue.md`](app-mailqueue.md) | `app/mailqueue.py`(按收件人目标取附件、正文范围提示与「发起人」一行) |
 
+### 交付链路
+
+| 文档 | 源码 |
+|---|---|
+| [`ci-docker-publish.md`](ci-docker-publish.md) | `.github/workflows/docker-publish.yml` + `compose.nas.yaml`(门禁、标签规则、双架构与拉取部署契约) |
+
 ### 路由、装配与模板
 
 | 文档 | 源码 |
@@ -80,6 +86,15 @@
 | [`app-routers-api-recipients.md`](app-routers-api-recipients.md) | `app/routers/api_recipients.py`(账号/历史绑定/家庭三类收信范围与确认参数) |
 | [`app-routers-api-settings.md`](app-routers-api-settings.md) | `app/routers/api_settings.py` + `api_sync.py`(管理员专属化) |
 | [`templates.md`](templates.md) | `templates/`(家庭版清单、角色分级导航、无内联脚本) |
+
+## 本轮变更(2026-10-14)
+
+1. **新增交付链路(不改 `app/` 代码、不加迁移)**:
+   `.github/workflows/docker-publish.yml` 在 `master` 推送后先跑 `ruff` + `pytest` 门禁,
+   再构建 `linux/amd64` + `linux/arm64` 双架构镜像并推送到 `ghcr.io/xs-www/sisicalendar`;
+   新增 `compose.nas.yaml` 供 NAS 纯拉取部署(`image:` 替代 `build:`,服务名仍为 `calendar`,
+   端口只绑 `127.0.0.1:18443`)。契约见 [`ci-docker-publish.md`](ci-docker-publish.md);
+   操作步骤见《部署与运维》§2.9 / §5.1 / §5.2 与 `README.md` 的「部署」节。
 
 ## 本轮变更(2026-10-12)
 

@@ -1,6 +1,6 @@
 # GitHub Actions 自动构建镜像并发布到 GHCR —— 实施计划
 
-起草:2026-10-14 · 状态:**待实施**(尚未改动任何文件)
+起草:2026-10-14 · 状态:**已实施**(2026-10-14,交付物见第 2 节;CI 落地结果见第 10 节)
 
 目标:让 `master` 上的提交由 GitHub Actions 自动构建 Docker 镜像并推送到
 GitHub Container Registry(GHCR),NAS 侧只需 `pull` 就能部署与升级,不再需要把仓库
@@ -166,18 +166,20 @@ cache-to: type=gha,mode=max
 
 ## 6. 实施清单
 
-- [ ] 用 GitHub API 核 `setup-qemu-action` / `setup-buildx-action` / `login-action` 主版本
-- [ ] 新建 `.github/workflows/docker-publish.yml`(第 3 节)
-- [ ] 新建 `compose.nas.yaml`(第 4 节)
-- [ ] `README.md` 部署节补「CI 镜像 + NAS 拉取」小节
-- [ ] `docs/部署与运维.md` 新增「从 GHCR 拉取镜像部署到 NAS」一节,含:
-      首次部署、**升级前先 `app.cli backup`**、`pull` + `up -d --force-recreate`、
-      回滚到旧 `sha-*` tag、GHCR 私有包时的登录方式
-- [ ] 新建 `docs/static/ci-docker-publish.md`,并在 `docs/static/README.md` 索引与本轮变更登记
-- [ ] `todo.md` 登记本轮
+- [x] 用 GitHub API 核 `setup-qemu-action` / `setup-buildx-action` / `login-action` 主版本
+      → 2026-10-14 核到 **qemu v4.4.0 / buildx v4.4.1 / login v4.6.0**
+      (同日复核:checkout v7.0.1、setup-uv v10.3.0、metadata v6.2.0、build-push v7.4.0)
+- [x] 新建 `.github/workflows/docker-publish.yml`(第 3 节)
+- [x] 新建 `compose.nas.yaml`(第 4 节)
+- [x] `README.md` 部署节改为三条路径:路径 1 拉镜像 / 路径 2 源码构建 / 路径 3 离线 tar
+- [x] `docs/部署与运维.md` 新增 §2.9「从 GHCR 拉取预构建镜像部署」,并在 §5.1 / §5.2
+      补拉取式升级(`backup` → `pull` → `up -d --force-recreate`)与回滚(钉 `sha-*`)
+- [x] 新建 `docs/static/ci-docker-publish.md`,并在 `docs/static/README.md` 索引与本轮变更登记
+- [x] `todo.md` 登记本轮
 - [ ] 提交并推送 `master`,在 Actions 页面确认两个 job 绿、GHCR 出现 `latest` 与 `sha-*`
 - [ ] `docker manifest inspect ghcr.io/xs-www/sisicalendar:latest` 确认同时含 `amd64`/`arm64`
 - [ ] 在 NAS 上按文档走一遍首次部署,记录 `ps` / `/healthz` / 前缀路径的实测结果
+      (需要在目标机器上执行;GHCR 包可见性也要先改成 Public 或配 `read:packages` 的 PAT)
 
 ---
 

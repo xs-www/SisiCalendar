@@ -183,23 +183,57 @@ uv run ruff check app tests      # 静态检查
 
 ## 部署
 
-> **给 Agent 的第一句话:本仓库目前没有任何预构建镜像。** 既没有发布到 GHCR / Docker Hub 的
-> 镜像,也没有 `compose.nas.yaml`。可用的部署材料**只有**仓库里的 `Dockerfile` 与
-> `compose.yaml`,所以本机与 NAS 现在都是**从源码构建**。预构建镜像的流水线计划见
-> [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md),**尚未实施**——在该计划落地之前,
-> 任何脚本、文档补丁、自动化都**不得**引用 `compose.nas.yaml` 或
-> `ghcr.io/xs-www/sisicalendar`,它们还不存在。
+**先看目标机器能不能连上 `ghcr.io`,再选路径:**
 
-本机(Windows + Docker Desktop)的最短路径:
+| 路径 | 何时用 | 入口文件 |
+|---|---|---|
+| **1. 拉取 CI 预构建镜像**(NAS 首选) | 目标机器能访问 `ghcr.io` | `compose.nas.yaml`(纯拉取,无 `build:`) |
+| **2. 从源码构建** | 镜像还没发布,或拉不动 GHCR | `compose.yaml` + `Dockerfile` |
+| **3. 离线 tar 搬运** | 目标机器不方便构建、也不想连外网 | `docker save` / `docker load` |
+
+镜像由 GitHub Actions 在 `master` 每次推送后自动构建(**先过 ruff + pytest 门禁**),
+发布到 `ghcr.io/xs-www/sisicalendar`。流水线的设计、验收标准与「不做的事」见
+[`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md);触发条件、标签规则、平台与
+不可改动的约束见 [`docs/static/ci-docker-publish.md`](docs/static/ci-docker-publish.md)。
+
+本机开发机(Windows + Docker Desktop)的最短路径仍是本地构建:
 
 ```powershell
 Copy-Item .env.example .env      # 填写 SMTP、时区与 PUBLIC_BASE_URL
 docker compose up -d --build
 ```
 
-### 给 Agent:部署到本地 NAS 的 Docker(无镜像,从源码构建)
+### 给 Agent:部署到本地 NAS 的 Docker
 
-#### 路线 A:在 NAS 上直接构建(有 git + Docker 即可,推荐)
+#### 路径 1:拉取预构建镜像(首选)
+
+```bash
+# 1. 建目录,取出 compose.nas.yaml 与 .env.example(不需要整个仓库)
+mkdir -p /volume1/docker/sisi-calendar && cd /volume1/docker/sisi-calendar
+curl -fsSLO https://raw.githubusercontent.com/xs-www/SisiCalendar/master/compose.nas.yaml
+curl -fsSLo .env.example https://raw.githubusercontent.com/xs-www/SisiCalendar/master/.env.example
+
+# 2. 配置
+cp .env.example .env && chmod 600 .env
+#    必填 PUBLIC_BASE_URL(含 /calendar 前缀)与 SMTP_*;SESSION_SECRET 留空走文件密钥
+#    compose.nas.yaml 的宿主端口默认 18443(NAS 的 443 通常被管理界面占用),按需改
+
+# 3. 数据目录归属:镜像以非 root 用户 10001:10001 运行
+mkdir -p data && sudo chown -R 10001:10001 data
+
+# 4. 拉取并启动(容器启动时自动跑 Alembic 迁移与引导)
+docker compose -f compose.nas.yaml pull
+docker compose -f compose.nas.yaml up -d
+docker compose -f compose.nas.yaml logs -f calendar   # 期望 "Running upgrade ... -> 0008_delivery_actor"
+```
+
+> **GHCR 的包默认是私有的**:要么在
+> `https://github.com/users/xs-www/packages/container/sisicalendar/settings`
+> 把可见性改成 Public(NAS 免登录拉取),要么在 NAS 上
+> `echo '<勾了 read:packages 的 PAT>' | docker login ghcr.io -u xs-www --password-stdin`。
+> **钉版本 / 回滚**:把 `compose.nas.yaml` 里的 `:latest` 换成 `:sha-<7位>` 或 `:1.2.3` 再 `pull`。
+
+#### 路径 2:从源码构建(NAS 有 git + Docker 即可)
 
 ```bash
 # 1. 取代码。NAS 上没有 git 时改用 tarball:
@@ -223,7 +257,7 @@ docker compose up -d --build
 docker compose logs -f calendar        # 期望看到 "Running upgrade ... -> 0008_delivery_actor"
 ```
 
-#### 路线 B:离线搬运镜像(NAS 不方便构建,或拉不到外网)
+#### 路径 3:离线搬运镜像(不方便构建,也不想连外网)
 
 镜像与容器同架构才可用(绝大多数 NAS 是 `amd64`;ARM 机型见 `docker image inspect` 的
 `Architecture`)。在已有镜像的机器上导出:
@@ -252,6 +286,8 @@ docker compose up -d           # 不带 --build:同名镜像已存在,Compose �
 | 5 | `curl -i http://127.0.0.1:18443/calendar` | **`404` + `text/plain`**(旧的无令牌地址已永久取消) |
 | 6 | `docker compose logs calendar` | 迁移到最新版 + 引导完成,**无 `Traceback`** |
 
+> 用路径 1 部署时,下面每条 `docker compose` 都加 `-f compose.nas.yaml`。
+
 第 5 条是判别性的:若它返回 200 或 HTML,说明订阅命名空间被管理页污染了,不要交付。
 
 #### Agent 不可越过的约束
@@ -265,6 +301,8 @@ docker compose up -d           # 不带 --build:同名镜像已存在,Compose �
 - **迁移只由容器启动流程执行**:不要在宿主机跑 `uv run alembic`,它写死 `./data/calendar.db`,
   会打到真实库(容器在跑时尤其危险)。
 - **对外只挂 `/calendar` 一段**,不要挂裸 `/admin`、`/api`、`/login`、`/static`。
+- **不要为了「干净重建」去删 `./data`**:`calendar.db`、`session_secret`、`export/`、
+  `snapshots/` 都在里面,删掉等于数据与全家人的订阅地址一起丢。
 
 ### 对外暴露(Tailscale Serve)
 
@@ -290,8 +328,9 @@ tailscale serve --bg --yes --https=443 --set-path=/calendar http://127.0.0.1:443
 > 注意**轮换该密钥会让所有固定订阅地址与验证码哈希一起失效**。
 
 完整步骤、Tailscale ACL、备份恢复、升级回滚与故障排查见
-[`docs/部署与运维.md`](docs/部署与运维.md)(§2.4.1 是 NAS 的端口、目录与权限);
-预构建镜像(CI → GHCR)的实施计划见 [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md)。
+[`docs/部署与运维.md`](docs/部署与运维.md)(§2.4.1 是 NAS 的端口、目录与权限,
+§2.9 是「从 GHCR 拉取预构建镜像部署」);
+预构建镜像的流水线设计见 [`docs/CI镜像自动发布计划.md`](docs/CI镜像自动发布计划.md)。
 
 ## 目录结构
 
