@@ -33,6 +33,16 @@ services:
       DATA_DIR: /data
       HOST: 0.0.0.0
       PORT: "8000"
+      # 下面两项只服务于设置页的「对外地址(Tailscale)」卡片:
+      # HOST_PORT 让页面生成端口正确的 `tailscale serve` 命令(不能照抄文档里的 443),
+      # extra_hosts 让容器能探测宿主端口映射是否真的通了(管理员点一下才跑)。
+      # 它们**不改变**容器监听的端口(监听永远是 PORT=8000)。
+      HOST_PORT: "${HOST_PORT:-18443}"
+
+    # 让容器内可以用 host.docker.internal 访问宿主机(探测端口映射用);
+    # Docker 20.10+ 支持 host-gateway。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     restart: unless-stopped
 

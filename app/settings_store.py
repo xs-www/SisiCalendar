@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import urls
 from app.config import Settings, get_settings
 from app.models import AppSetting
 from app.timeutil import is_valid_timezone
@@ -19,14 +21,20 @@ from app.timezones import resolve_timezone, timezone_help
 
 logger = logging.getLogger(__name__)
 
-# 允许在界面覆盖的键 -> 对应的 Settings 字段
+#: 允许在界面覆盖的键 -> 对应的 Settings 字段
 OVERRIDABLE_KEYS = {
     "calendar_name": "calendar_name",
     "default_timezone": "default_timezone",
     "default_event_duration_minutes": "default_event_duration_minutes",
     "mail_max_attempts": "mail_max_attempts",
     "mail_backoff_minutes": "mail_backoff_minutes",
+    "public_base_url": "public_base_url",
 }
+
+#: 对外基地址:库里**只存 origin**(`https://节点[:端口]`),完整地址由它 +
+#: 环境变量给出的挂载前缀拼出来。理由:路径前缀是启动时挂载路由用的
+#: (`app/main.py`),运行时改它会让链接与路由错位,所以界面只能改域名/端口。
+PUBLIC_BASE_URL_KEY = "public_base_url"
 
 INT_KEYS = {"default_event_duration_minutes", "mail_max_attempts"}
 
@@ -46,7 +54,92 @@ def load_overrides(session: Session) -> dict[str, str]:
     }
 
 
-def validate_overrides(values: dict[str, Any]) -> dict[str, str]:
+def normalize_public_base_origin(raw: object, settings: Settings) -> str:
+    """把「对外地址」输入规范成 origin;不合法时抛 `SettingValidationError`。
+
+    只接受 `<scheme>://<host>[:port]`,允许用户直接粘贴完整基地址(路径部分必须与
+    当前挂载前缀一致,否则报错并说明「路径前缀只能改环境变量」)。返回 `https://主机[:端口]`,
+    不带路径、不带尾斜杠。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise SettingValidationError({PUBLIC_BASE_URL_KEY: "对外地址不能为空"})
+    candidate = text if "://" in text else f"https://{text}"
+    try:
+        parts = urlsplit(candidate)
+        port = parts.port
+    except ValueError:
+        raise SettingValidationError(
+            {PUBLIC_BASE_URL_KEY: "端口不是一个数字(形如 `https://主机:18443`)"}
+        ) from None
+
+    if parts.scheme not in {"http", "https"}:
+        raise SettingValidationError(
+            {PUBLIC_BASE_URL_KEY: "只支持 http 或 https 地址"}
+        )
+    host = parts.hostname
+    if not host:
+        raise SettingValidationError(
+            {
+                PUBLIC_BASE_URL_KEY: (
+                    "请填写主机名,例如 `sisi-laptop.tail921448.ts.net`"
+                    "(Tailscale 里 `tailscale status` 能看到)"
+                )
+            }
+        )
+    if parts.username or parts.password:
+        raise SettingValidationError(
+            {PUBLIC_BASE_URL_KEY: "地址里不要带用户名或口令"}
+        )
+    if parts.query or parts.fragment:
+        raise SettingValidationError(
+            {PUBLIC_BASE_URL_KEY: "地址里不要带 `?` 或 `#` 后面的内容"}
+        )
+
+    base_path = urls.public_base_path(settings)
+    supplied_path = urls.normalize_prefix(parts.path)
+    # 只填域名(或只写到 `/`)时接受:路径前缀由我们按环境变量补上;
+    # 但只要写了路径,就必须与挂载前缀逐字一致 —— 这里绝不能悄悄改挂载点。
+    if supplied_path and supplied_path != base_path:
+        raise SettingValidationError(
+            {
+                PUBLIC_BASE_URL_KEY: (
+                    f"路径部分只能是 `{base_path or '(无)'}`,现在填的是 "
+                    f"`{parts.path}`。路径前缀决定了公开面的挂载点,"
+                    "只能改环境变量 `PUBLIC_BASE_URL` 并重建容器,界面里改不了。"
+                )
+            }
+        )
+
+    normalized_host = f"[{host}]" if ":" in host else host.lower()
+    origin = f"{parts.scheme}://{normalized_host}"
+    if port:
+        origin += f":{port}"
+    return origin
+
+
+def compose_public_base_url(origin: str, settings: Settings) -> str | None:
+    """`origin + 当前挂载前缀` → 完整基地址;origin 不合法/为空时返回 `None`。
+
+    返回 `None` 表示「这次覆盖值不可用」,调用方应退回环境配置。
+    """
+    text = str(origin or "").strip()
+    if not text:
+        return None
+    try:
+        parts = urlsplit(text)
+        if parts.scheme not in {"http", "https"} or not parts.hostname:
+            return None
+        if parts.username or parts.password:
+            return None
+    except ValueError:  # pragma: no cover - 端口异常
+        return None
+    return f"{parts.scheme}://{parts.netloc}{urls.public_base_path(settings)}"
+
+
+def validate_overrides(
+    values: dict[str, Any], settings: Settings | None = None
+) -> dict[str, str]:
     """校验并规范化待写入的覆盖项。"""
     errors: dict[str, str] = {}
     cleaned: dict[str, str] = {}
@@ -55,6 +148,16 @@ def validate_overrides(values: dict[str, Any]) -> dict[str, str]:
         if key not in OVERRIDABLE_KEYS or raw is None:
             continue
         text = str(raw).strip()
+        if key == PUBLIC_BASE_URL_KEY:
+            if not text:
+                # 空值 = 撤销覆盖,回到环境变量(写库由 save_overrides 处理)
+                cleaned[key] = ""
+                continue
+            try:
+                cleaned[key] = normalize_public_base_origin(text, settings or get_settings())
+            except SettingValidationError as exc:
+                errors[key] = exc.fields[key]
+            continue
         if key == "calendar_name":
             if not text:
                 errors[key] = "日历名称不能为空"
@@ -100,10 +203,17 @@ def validate_overrides(values: dict[str, Any]) -> dict[str, str]:
     return cleaned
 
 
-def save_overrides(session: Session, values: dict[str, Any]) -> dict[str, str]:
-    cleaned = validate_overrides(values)
+def save_overrides(
+    session: Session, values: dict[str, Any], settings: Settings | None = None
+) -> dict[str, str]:
+    cleaned = validate_overrides(values, settings)
     for key, value in cleaned.items():
         row = session.get(AppSetting, key)
+        if not value:
+            # 空值 = 撤销这一项覆盖,回到环境变量
+            if row is not None:
+                session.delete(row)
+            continue
         if row is None:
             session.add(AppSetting(key=key, value=value))
         else:
@@ -126,6 +236,12 @@ def effective_settings(session: Session, base: Settings | None = None) -> Settin
     updates: dict[str, Any] = {}
     for key, raw in overrides.items():
         field = OVERRIDABLE_KEYS[key]
+        if key == PUBLIC_BASE_URL_KEY:
+            # 库里只有 origin;完整地址 = origin + 环境变量给的挂载前缀
+            composed = compose_public_base_url(raw, resolved)
+            if composed:
+                updates[field] = composed
+            continue
         if key in INT_KEYS:
             try:
                 updates[field] = int(raw)

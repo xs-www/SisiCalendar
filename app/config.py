@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     #: 本机管理页不受影响,仍可用裸路径 `http://localhost:443/admin` 访问。
     public_base_url: str = "https://sisi-laptop.tail921448.ts.net/calendar"
     feed_cache_seconds: int = 300
+    #: 宿主机上发布的端口(`compose.yaml` 是 443,`compose.nas.yaml` 默认 18443)。
+    #: 只用于两个地方:设置页生成 `tailscale serve` 命令、从容器内探测宿主端口是否真的
+    #: 映射通了。应用**不**用它监听(监听永远是 `PORT`,容器内 8000)。
+    host_port: int = 443
 
     # ---------- SMTP ----------
     smtp_host: str | None = None

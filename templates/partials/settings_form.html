@@ -61,6 +61,48 @@
            value="{{ overrides.get('mail_backoff_minutes', settings.mail_backoff_minutes) }}">
   </label>
 
+  <hr>
+  <h3>对外地址(Tailscale)</h3>
+
+  <label class="field">
+    <span>对外基地址 <em>只改域名与端口;留空 = 回到环境变量</em></span>
+    <input type="text" name="public_base_url" value="{{ public_base_url_input }}"
+           placeholder="https://sisi-laptop.tail921448.ts.net">
+  </label>
+  <p class="hint">
+    当前生效:<code>{{ public_base_url_effective }}</code>
+    {%- if public_base_url_override %}(来自界面覆盖){% else %}(来自环境变量 <code>PUBLIC_BASE_URL</code>){% endif %}<br>
+    路径前缀 <code>{{ public_base_path or '(无)' }}</code> 是公开面的挂载点,改它要改
+    <code>PUBLIC_BASE_URL</code> 并重建容器,这一栏改不了路径。邀请链接、每人的订阅地址、
+    邮件正文里的地址都从这里派生,保存后立刻生效(**不需要重启**)。
+  </p>
+  {% if public_base_url_suggested %}
+    <p class="hint">
+      已按你当前的访问地址自动填入 <code>{{ public_base_url_suggested }}</code>,确认无误后保存即可。
+    </p>
+  {% else %}
+    <p class="hint">
+      当前不是从 tailnet 域名进来的(浏览器地址栏如果是 <code>localhost</code>,
+      服务端无从知道你 tailnet 的节点名),请手动填写,形如
+      <code>https://节点名.你的tailnet.ts.net</code>;节点名可以用 <code>tailscale status</code> 查看。
+    </p>
+  {% endif %}
+
+  <div class="form-actions">
+    <button type="button" class="button"
+            hx-post="{{ bp() }}/admin/actions/host-port-check"
+            hx-target="#host-port-result"
+            hx-swap="innerHTML">检测宿主端口映射</button>
+  </div>
+  <div id="host-port-result"></div>
+
+  <p class="hint">
+    宿主机上的 Tailscale Serve 只能由你在宿主机执行(应用在容器里、非 root,不碰整机配置)。
+    端口取自 <code>HOST_PORT</code> = <code>{{ host_port }}</code>,路径必须与挂载前缀逐字相同:<br>
+    <code>tailscale serve status | tee tailscale-serve-backup.txt</code>   ← 先快照<br>
+    <code>{{ serve_command }}</code>
+  </p>
+
   <div class="form-actions">
     <button type="submit" class="button primary">保存设置</button>
   </div>

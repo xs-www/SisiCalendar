@@ -200,6 +200,9 @@ class SettingsUpdate(BaseModel):
     default_event_duration_minutes: int | None = None
     mail_max_attempts: int | None = None
     mail_backoff_minutes: str | None = None
+    #: 对外基地址的 **origin**(`https://节点[:端口]`);路径部分不能在这里改,
+    #: 它由环境变量 `PUBLIC_BASE_URL` 决定(见 `app/settings_store.py`)
+    public_base_url: str | None = None
 
     # 同 EventWrite.timezone:默认时区也允许填序号或中文名
     _normalize_timezone = field_validator("default_timezone", mode="before")(_timezone_before)

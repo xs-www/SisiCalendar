@@ -28,7 +28,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import email_verify, feed_tokens, invites, token_store, urls
+from app import email_verify, feed_tokens, host_port, invites, token_store, urls
 from app.accounts import (
     AccountError,
     calendar_access,
@@ -67,6 +67,7 @@ from app.recurrence import SIMPLE_LABELS, split_rrule
 from app.reminders import custom_reminder_text, preset_options
 from app.security import AuditLog, rate_limiter
 from app.settings_store import (
+    PUBLIC_BASE_URL_KEY,
     SettingValidationError,
     effective_settings,
     load_overrides,
@@ -1253,6 +1254,8 @@ def settings_page(
     context.update(
         {
             "overrides": overrides,
+            # `partials/settings_form.html` 整页 include:变量名必须与 HTMX 局部渲染一致
+            **_settings_form_context(request, settings, overrides),
             "recipients": _recipients(session),
             "account_recipients": _account_recipient_entries(session),
             "tokens": token_store.list_tokens(session),
@@ -1778,18 +1781,80 @@ def revoke_family_feed(
 # --------------------------------------------------------------------------
 # HTMX 局部片段:日历设置与同步操作(管理员)
 # --------------------------------------------------------------------------
+def _tailnet_origin_hint(request: Request, settings: Settings) -> str:
+    """从本次请求推导「对外地址」候选;只有 tailnet 域名(`*.ts.net`)才自动填入。
+
+    经 Tailscale Serve 访问时,请求里带着节点域名(`Host`)与转发头
+    (`X-Forwarded-Proto`)。这两个头**只是建议来源,不是安全判据**:
+    值最终要管理员确认保存后才写库,而且只允许写到 `*.ts.net` 上。
+    """
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host or host.startswith("["):
+        return ""
+    name = host.rsplit(":", 1)[0]
+    if not name.endswith(".ts.net"):
+        return ""
+    scheme = (
+        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    )
+    if scheme not in {"http", "https"}:
+        scheme = "https"
+    return f"{scheme}://{name}"
+
+
+def _serve_command(settings: Settings) -> str:
+    """给宿主机复制用的 `tailscale serve` 命令。
+
+    端口取自 `HOST_PORT`(**不能照抄文档里的 443**:`compose.nas.yaml` 发布的是 18443),
+    路径取自挂载前缀;`--set-path` 与目标 URL 的路径必须逐字相同。
+    """
+    base_path = urls.public_base_path(settings)
+    target = f"http://127.0.0.1:{settings.host_port}{base_path}"
+    if base_path:
+        return f"tailscale serve --bg --yes --https=443 --set-path={base_path} {target}"
+    return f"tailscale serve --bg --yes --https=443 {target}"
+
+
+def _settings_form_context(
+    request: Request, settings: Settings, overrides: dict[str, str]
+) -> dict[str, object]:
+    """`partials/settings_form.html` 的上下文。
+
+    `settings.html` 整页 include 这个片段、HTMX 保存后又只换这一个片段,两条渲染路径
+    必须给出**同一套变量**(模板开了 `StrictUndefined`,少一个就是 500)。
+    """
+    env_settings = getattr(request.app.state, "settings", settings)
+    override_origin = overrides.get(PUBLIC_BASE_URL_KEY, "")
+    suggested_origin = "" if override_origin else _tailnet_origin_hint(request, settings)
+    return {
+        "settings": settings,
+        "overrides": overrides,
+        # 对外地址卡片:当前生效值 / 环境变量值 / 库里的 origin 覆盖 / 自动检测到的候选
+        "public_base_url_effective": urls.public_base_url(settings),
+        "public_base_url_env": urls.public_base_url(env_settings),
+        "public_base_url_override": override_origin,
+        "public_base_url_input": override_origin
+        or suggested_origin
+        or urls.public_base_url(env_settings),
+        "public_base_url_suggested": suggested_origin,
+        "public_base_path": urls.public_base_path(settings),
+        "host_port": settings.host_port,
+        "serve_command": _serve_command(settings),
+    }
+
+
 def _settings_form_response(
     request: Request, session: Session, settings: Settings, admin, *,
     notice: str | None, error: str | None, status_code: int = 200,
 ) -> Response:
+    overrides = load_overrides(session)
     return templates.TemplateResponse(
         request,
         "partials/settings_form.html",
         {
             "request": request,
             "csrf_token": admin.csrf_token,
-            "settings": settings,
-            "overrides": load_overrides(session),
+            **_settings_form_context(request, settings, overrides),
             **_timezone_context(settings.default_timezone),
             "notice": notice,
             "error": error,
@@ -1808,6 +1873,7 @@ def save_settings_action(
     default_event_duration_minutes: str = Form(default="60"),
     mail_max_attempts: str = Form(default="5"),
     mail_backoff_minutes: str = Form(default="1,5,15,60,180"),
+    public_base_url: str = Form(default=""),
 ) -> Response:
     values = {
         "calendar_name": calendar_name,
@@ -1815,9 +1881,11 @@ def save_settings_action(
         "default_event_duration_minutes": default_event_duration_minutes,
         "mail_max_attempts": mail_max_attempts,
         "mail_backoff_minutes": mail_backoff_minutes,
+        # 对外地址:只允许改 origin;空值 = 撤销覆盖、回到环境变量
+        "public_base_url": public_base_url,
     }
     try:
-        save_overrides(session, values)
+        save_overrides(session, values, effective_settings(session))
         session.commit()
     except SettingValidationError as exc:
         session.rollback()
@@ -1834,6 +1902,36 @@ def save_settings_action(
     AuditLog.record("settings_save", "success", actor=admin.username)
     return _settings_form_response(
         request, session, effective_settings(session), admin, notice="设置已保存。", error=None
+    )
+
+
+@router.post(
+    "/admin/actions/host-port-check", response_class=HTMLResponse, include_in_schema=False
+)
+def host_port_check_action(
+    request: Request,
+    admin: CsrfAdminDep,
+    session: Session = Depends(get_db),
+) -> Response:
+    """探测宿主端口映射是否真的通了(管理员点一下才跑,不在页面加载时自动跑)。
+
+    只连 `host.docker.internal:<HOST_PORT>/healthz`,主机名写死、端口只认数字,
+    见 `app/host_port.py`。
+    """
+    settings = effective_settings(session)
+    reachable, detail = host_port.probe_host_port(settings)
+    AuditLog.record(
+        "host_port_check", "success" if reachable else "failed", actor=admin.username
+    )
+    return templates.TemplateResponse(
+        request,
+        "partials/host_port_check.html",
+        {
+            "request": request,
+            "reachable": reachable,
+            "detail": detail,
+            "host_port": settings.host_port,
+        },
     )
 
 

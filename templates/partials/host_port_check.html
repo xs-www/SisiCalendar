@@ -1,0 +1,9 @@
+<div class="alert {{ 'ok' if reachable else 'error' }}">
+  {{ detail }}
+</div>
+<p class="hint">
+  探测方式:容器内访问 <code>host.docker.internal:{{ host_port }}/healthz</code>
+  (主机名写死、端口只认数字)。本机源码运行或未加
+  <code>extra_hosts: ["host.docker.internal:host-gateway"]</code> 时连不上是正常的——
+  那种情况下请在宿主机上直接确认 <code>docker compose ps</code> 的端口映射。
+</p>
